@@ -1,0 +1,669 @@
+---
+title: "s5_220301_human_tnbc_integration_rliger"
+author: "nlc"
+date: "2/8/2022"
+output:
+  rmdformats::downcute:
+      self_contained: true
+      highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = 'center', out.width = "90%", fig.asp = 0.52)
+```
+
+<style>
+    body .main-container {
+        max-width: 2160px;
+    }
+</style>
+
+
+# Set up
+
+## Set seed
+```{r}
+set.seed(5)
+```
+
+
+## Load libraries
+```{r}
+library(tidyverse)
+library(Seurat)
+library(ggalluvial)
+```
+
+## Load wu et all data, normalize and run PCA/UMAP
+
+
+```{r}
+if(file.exists('analysis_files/s5_so_wu.rds')){
+  so_wu <- readRDS('analysis_files/s5_so_wu.rds')
+}else{
+  print('Wu et al Seurat object not found, loading from publication files')
+  
+  # Read counts
+  wu_10x <- Read10X('/Users/Nick/OneDrive - Oregon Health & Science University/public_data/wu_et_al_2021_nat_gen/data/')
+  
+  # Read metadata & convert to Seurat accepted format
+  wu_meta <- read_csv('/Users/Nick/OneDrive - Oregon Health & Science University/public_data/wu_et_al_2021_nat_gen/Whole_miniatlas_meta.csv',
+                      lazy = FALSE)[-1,] %>%
+    mutate(Percent_mito = as.numeric(Percent_mito)) %>%
+    mutate(nCount_RNA = as.numeric(nCount_RNA)) %>%
+    mutate(nFeature_RNA = as.numeric(nFeature_RNA))
+  
+  wu_meta_df <- as.data.frame(wu_meta)
+  row.names(wu_meta_df) <- wu_meta_df$NAME
+  
+  # Read patient metadata and add to wu_meta_df
+  wu_patient_meta <- read_csv('/Users/Nick/OneDrive - Oregon Health & Science University/public_data/wu_et_al_2021_nat_gen/supplementary_table1.csv',
+                              lazy = FALSE) %>%
+    janitor::clean_names() %>%
+    mutate(patient_id = paste0('CID', str_remove(case_id, pattern = '-|A|N'))) %>%
+    mutate(her2_status = subtype_by_ihc %in% c('HER2+/ER+', 'HER2+')) %>%
+    mutate(er_status = subtype_by_ihc %in% c('HER2+/ER+', 'ER+'))
+  
+  # Add ER and HER2 status back to scRNA-seq meta for easier plotting later
+  
+  wu_meta_df$her2_status <- plyr::mapvalues(x = str_remove(wu_meta_df$Patient, pattern = 'A|N'),
+                                        from = wu_patient_meta$patient_id,
+                                        to = wu_patient_meta$her2_status)
+  
+  wu_meta_df$er_status <- plyr::mapvalues(x = str_remove(wu_meta_df$Patient, pattern = 'A|N'),
+                                        from = wu_patient_meta$patient_id,
+                                        to = wu_patient_meta$er_status)
+  
+  wu_meta_df$subtype_by_ihc <- plyr::mapvalues(x = str_remove(wu_meta_df$Patient, pattern = 'A|N'),
+                                        from = wu_patient_meta$patient_id,
+                                        to = wu_patient_meta$subtype_by_ihc) 
+  
+  
+  # Confirm all cell barcodes have meta data
+  sum(colnames(wu_10x) %in% row.names(wu_meta_df))/length(unique(colnames(wu_10x), row.names(wu_meta_df)))
+  
+  # Create seurat object
+  so_wu <- CreateSeuratObject(counts = wu_10x,
+                              meta.data = wu_meta_df,
+                              project = 'wu_2020_natgen')
+  
+  wu_10x <- wu_meta <- wu_meta_df <- NULL
+  gc()
+  
+  
+  ## Normalize, find variable features and scale
+  
+  so_wu <- NormalizeData(so_wu)
+  so_wu <- FindVariableFeatures(so_wu)
+  top_vf <- head(VariableFeatures(so_wu), 50)
+  LabelPoints(plot = VariableFeaturePlot(so_wu),
+              points = top_vf)
+  so_wu <- ScaleData(so_wu)
+  
+  ## PCA and UMAP
+  so_wu <- RunPCA(so_wu,
+                npcs = 50)
+
+  ElbowPlot(so_wu,
+            ndims = 50)
+  
+  so_wu <- RunUMAP(so_wu,
+                   dims = 1:20)
+  
+  saveRDS(so_wu, 'analysis_files/s5_so_wu.rds')
+}
+
+```
+# Wu et all analysis
+
+## QC was already performed by original authors
+
+```{r}
+FeatureScatter(so_wu,
+               feature1 = 'nCount_RNA',
+               feature2 = 'nFeature_RNA')
+
+FeatureScatter(so_wu,
+               feature1 = 'nCount_RNA',
+               feature2 = 'Percent_mito')
+
+range(so_wu@meta.data$nCount_RNA)
+range(so_wu@meta.data$nFeature_RNA)
+range(so_wu@meta.data$Percent_mito)
+```
+
+## Visualize UMAP
+```{r, fig.asp = 1}
+
+DimPlot(so_wu,
+        raster = TRUE)+
+  coord_equal()
+
+DimPlot(so_wu,
+        raster = TRUE,
+        group.by = 'celltype_major',
+        label = TRUE)+
+  coord_equal()
+
+DimPlot(so_wu,
+        raster = TRUE,
+        group.by = 'normal_cell_call',
+        label = TRUE)+
+  coord_equal()
+
+DimPlot(so_wu,
+        raster = TRUE,
+        group.by = 'celltype_minor',
+        label = TRUE)+
+  coord_equal()+
+  theme(legend.position = 'none')
+
+DimPlot(so_wu,
+        raster = TRUE,
+        group.by = 'celltype_minor',
+        label = FALSE)+
+  coord_equal()
+
+DimPlot(so_wu,
+        raster = TRUE,
+        group.by = 'celltype_subset',
+        label = TRUE)+
+  coord_equal()+
+  theme(legend.position = 'none')
+
+DimPlot(so_wu,
+        raster = TRUE,
+        group.by = 'subtype',
+        label = TRUE,
+        shuffle = TRUE)+
+  coord_equal()
+
+DimPlot(so_wu,
+        raster = TRUE,
+        group.by = 'subtype',
+        label = TRUE)+
+  facet_wrap(~subtype)
+```
+
+# Celltype assignments
+
+## Review wu et all celltype labels
+
+```{r, fig.asp = 2}
+
+so_wu@meta.data %>%
+  as.tibble() %>%
+  dplyr::select(celltype_major, celltype_minor, celltype_subset) %>%
+  distinct() %>%
+  DT::datatable()
+
+so_wu_labels_freq <- so_wu@meta.data %>%
+  dplyr::select(celltype_major, celltype_minor, celltype_subset) %>%
+  group_by(celltype_major, celltype_minor, celltype_subset) %>%
+  summarize(n_cells = n())
+
+ggplot(so_wu_labels_freq, aes(y = n_cells, axis1 = celltype_major, axis2 = celltype_minor, axis3 = celltype_subset, fill = celltype_major))+
+    geom_alluvium()+
+    geom_stratum()+
+    geom_label(stat = "stratum", aes(label = after_stat(stratum)))+
+    theme_minimal()+
+    scale_x_discrete(limits = c('celltype_major', 'celltype_minor', 'celltype_subset'))+
+    labs(fill = 'celltype_major')
+
+```
+
+
+## Recode from wu celltype_major to 'lineage' equivalent from Myc;Ptenfl analysis
+
+```{r}
+unique(so_wu@meta.data$celltype_major)
+
+celltype_major_l1_dict <- rbind(c('Endothelial', 'endothelial'),
+                                c('CAFs', 'fibroblast'),
+                                c('PVL', 'perivascular'),
+                                c('B-cells', 'lymphoid'),
+                                c('T-cells', 'lymphoid'),
+                                c('Myeloid', 'myeloid'),
+                                c('Normal Epithelial', 'epithelial'),
+                                c('Plasmablasts', 'lymphoid'),
+                                c('Cancer Epithelial', 'epithelial'))
+
+DT::datatable(celltype_major_l1_dict)
+
+so_wu@meta.data$celltype_l1 <- plyr::mapvalues(x = so_wu@meta.data$celltype_major,
+                                         from = celltype_major_l1_dict[,1],
+                                         to = celltype_major_l1_dict[,2])
+
+DimPlot(so_wu,
+        group.by = 'celltype_major',
+        label = TRUE)+
+  coord_equal()+
+  theme(legend.position = 'none')
+
+DimPlot(so_wu,
+        group.by = 'celltype_l1',
+        label = TRUE)+
+  theme(legend.position = 'none')
+```
+
+# Find orthologous features
+
+## Load Myc;Ptenfl data
+```{r}
+so_merge <- readRDS('analysis_files/s4_so_merge.rds')
+
+Idents(so_merge) <- 'cluster_l2'
+```
+
+## Find orthologous (shared) features across the two data sets
+
+```{r}
+library(nichenetr)
+mycpten_features <- tibble(orig.features = rownames(so_merge)) %>%
+  mutate(converted.features = convert_mouse_to_human_symbols(orig.features)) %>%
+  mutate(new.features = converted.features)
+
+mycpten_features$new.features[is.na(mycpten_features$new.features)] <- mycpten_features$orig.features[is.na(mycpten_features$new.features)]
+
+ortho_features <- mycpten_features$converted.features[! is.na(mycpten_features$converted.features)]
+```
+
+# scPred: Wu celltype_minor -> mycpten data
+
+## Subset Wu data to only use shared genes
+
+```{r, fig.asp = 1}
+library(scPred)
+
+if(file.exists('analysis_files/s5_so_wu_shared_trained.rds')){
+  print('Loading pre-trained scPred model/Seurat object: s5_so_wu_shared_trained.rds file')
+  
+  so_wu_shared <- readRDS('analysis_files/s5_so_wu_shared_trained.rds')
+  
+}else{
+  print('Could not find pre-trained scPred model, subseting to shared ortholog features and preparing for model training:')
+  
+  
+  
+  # Subset to only shared features with mouse
+  so_wu_shared <- subset(so_wu,
+                         features = ortho_features)
+  
+  #subset = celltype_minor %in% names(celltype_minor_table)[celltype_minor_table > 100]
+  
+  dim(so_wu)
+  dim(so_wu_shared)
+  
+  # Find variable features, run PCA and UMAP then visualize
+  so_wu_shared <- FindVariableFeatures(so_wu_shared)
+  so_wu_shared <- ScaleData(so_wu_shared,
+                            features = VariableFeatures(so_wu_shared))
+  so_wu_shared <- RunPCA(so_wu_shared)
+  ElbowPlot(so_wu_shared)
+  so_wu_shared <- RunUMAP(so_wu_shared,
+                          dims = 1:10)
+}
+
+Idents(so_wu_shared) <- 'celltype_minor'
+
+DimPlot(so_wu_shared,
+        group.by = 'celltype_minor',
+        label = TRUE,
+        repel = TRUE)+
+  coord_equal()+
+  theme(legend.position = 'none')
+```
+
+
+## Build predictive model
+
+```{r}
+if(file.exists('analysis_files/s5_so_wu_shared_trained.rds')){
+  
+  print('Classifier already trained, not re-computing')
+  
+}else{
+  
+  print('Training model')
+  so_wu_shared <- getFeatureSpace(so_wu_shared,
+                         'celltype_minor')
+
+  so_wu_shared <- trainModel(so_wu_shared,
+                             model = 'mda')
+  
+  print('Saving trained model')
+  
+  saveRDS(so_wu_shared, file = 'analysis_files/s5_so_wu_shared_trained.rds')
+
+  # saveRDS(so_wu_shared@misc$scPred, file = 'analysis_files/s5_scpred_wu_shared.rds')
+  
+}
+
+```
+
+
+## Look at results
+
+```{r, fig.asp = 1}
+
+so_wu_shared@misc$scPred
+
+get_probabilities(so_wu_shared) %>%
+  head()
+
+plot_probabilities(so_wu_shared)
+```
+
+## Convert so_merge to subset of ortholog features
+```{r, fig.asp = 1}
+if(file.exists('analysis_files/s5_so_merge_subset_mda_scpred.rds')){
+  print('s5_so_merge_subset_mda_scpred.rds already exists, not recomputing')
+  
+}else{
+  print('Applying classifier to myc;ptenfl data')
+  
+  so_merge_subset <- subset(so_merge,
+                          features = mycpten_features$orig.features[!is.na(mycpten_features$converted.features)])
+
+  # Rename the features
+  rownames(so_merge_subset@assays$RNA@counts) <- plyr::mapvalues(x = rownames(so_merge_subset@assays$RNA@counts),
+                                                                 from = mycpten_features$orig.features,
+                                                                 to = mycpten_features$converted.features,
+                                                                 warn_missing = FALSE)
+  
+  rownames(so_merge_subset@assays$RNA@data) <- plyr::mapvalues(x = rownames(so_merge_subset@assays$RNA@data),
+                                                                 from = mycpten_features$orig.features,
+                                                                 to = mycpten_features$converted.features,
+                                                                 warn_missing = FALSE)
+  
+  
+  # Find new variable features and rescale
+  
+  so_merge_subset <- scPredict(so_merge_subset, so_wu_shared)
+  
+  # Visualize assigned label
+  DimPlot(so_merge_subset,
+          group.by = 'scpred_prediction')+
+    coord_equal()
+  
+  # Celltype_full vs assigned label
+  
+  freq <- so_merge_subset@meta.data %>%
+    dplyr::select(celltype_full, scpred_prediction) %>%
+    table()
+  
+   nmi <- aricode::NMI(c1 = so_merge_subset@meta.data$celltype_full,
+                     c2 = so_merge_subset@meta.data$scpred_prediction)
+   
+   ari <- aricode::ARI(c1 = so_merge_subset@meta.data$celltype_full,
+                     c2 = so_merge_subset@meta.data$scpred_prediction)
+  
+  pheatmap::pheatmap(prop.table(freq, margin = 1),
+                     display_numbers = freq,
+                     main = paste0('NMI: ', nmi, '\n ARI: ', ari))
+  
+  saveRDS(so_merge_subset, file = 'analysis_files/s5_so_merge_subset_mda_scpred.rds')
+}
+```
+
+## Split by celltype_l1
+```{r, eval = FALSE}
+# heatmap split by lineage
+
+for(i in c('epithelial', 'fibroblast', 'myeloid', 'lymphoid')){
+  curr_subset <- subset(so_merge_subset, subset = lineage == i)
+  
+  curr_freq <- curr_subset@meta.data %>%
+    dplyr::select(celltype_full, scpred_prediction) %>%
+    table()
+  
+ labels <- curr_subset@meta.data %>%
+    dplyr::select(celltype_full, scpred_prediction)
+  
+  # filter empty rows/columns
+  
+  curr_freq <- curr_freq[rowSums(curr_freq) != 0, colSums(curr_freq) != 0]
+
+  p1 <- pheatmap::pheatmap(prop.table(curr_freq, margin = 1),
+                           display_numbers = round(prop.table(curr_freq, margin = 1), 2),
+                           main = i)
+  
+  print(p1)
+}
+```
+
+
+
+
+# Cross-species integration with UINMF via RLiger
+
+
+
+## convert from mouse gene to human gene via known orthologs.
+
+```{r}
+library(rliger)
+library(SeuratWrappers)
+
+if(file.exists('analysis_files/s5_xspecies_uinmf_so.rds')){
+  print('Loading saved UINMF integrated .rds')
+  
+  species.liger <- readRDS('analysis_files/s5_xspecies_uinmf_rliger.rds')
+  so_rliger <- readRDS('analysis_files/s5_xspecies_uinmf_so.rds')
+  
+}else{
+  print('Did not find saved Seurat integrated data, processing new one')
+  
+  #Remove files from classifier
+  rm(so_wu_shared)
+  rm(so_merge_subset)
+  
+  # Pull metadata
+  wu_meta <- so_wu@meta.data
+  mycpten_meta <- so_merge@meta.data
+  
+  # pull counts
+  wu_counts <- so_wu@assays$RNA@counts
+  mycpten_counts <- so_merge@assays$RNA@counts
+  
+  # Remove unneeded seurat objects to make room for rliger object
+  rm(so_wu)
+  rm(so_merge)
+  gc()
+  
+  # Convert row names to human ortholog when possible
+  
+  rownames(mycpten_counts) <- mycpten_features$new.features
+  
+  tibble(n_mouse_features = nrow(mycpten_counts),
+         n_human_features = nrow(wu_counts),
+         n_shared_features = length(intersect(rownames(wu_counts), rownames(mycpten_counts)))) %>%
+    knitr::kable()
+  
+  # Add ortholog filtered count
+  
+  # Combine into cross-species liger object
+  species.liger <- createLiger(list(mouse = mycpten_counts,
+                                    human = wu_counts),
+                               take.gene.union = FALSE)
+
+}
+```
+
+## Normalize, select genes, scale and perform joint matrix factorization
+```{r}
+if(!file.exists('analysis_files/s5_xspecies_uinmf_so.rds')){
+  species.liger <- normalize(species.liger)
+
+  species.liger <- selectGenes(species.liger,
+                               var.thres= 0.3,
+                               unshared = TRUE,
+                               unshared.datasets = list(1,2),
+                               unshared.thresh = 0.3)
+  
+  species.liger <- scaleNotCenter(species.liger)  
+
+  species.liger <- optimizeALS(species.liger,
+                             lambda = 5,
+                             use.unshared = TRUE,
+                             thresh = 1e-10,
+                             k = 50,
+                             nrep = 5)
+  
+  species.liger <- quantile_norm(species.liger,
+                                 ref_dataset = "human")
+}
+
+```
+
+
+## Quantile Norm, clustering and process UMAP
+
+```{r}
+if(!file.exists('analysis_files/s5_xspecies_uinmf_so.rds')){
+  
+
+  # Delete above
+  
+  species.liger <- louvainCluster(species.liger)
+  
+  species.liger <- runUMAP(species.liger)
+  
+  saveRDS(species.liger, 'analysis_files/s5_xspecies_uinmf_rliger.rds')
+  
+  # Convert to seurat object and save
+  
+  # Convert to seurat object and run umap + find neighbors + unoptimized clustering
+  so_rliger <- ligerToSeurat(species.liger)
+  so_rliger <- RunUMAP(so_rliger, reduction = 'inmf', dims = 1:50)
+  so_rliger <- FindNeighbors(so_rliger, 
+                             reduction = 'inmf',
+                             dims = 1:50)
+  
+  so_rliger <- FindClusters(so_rliger,
+                            resolution = 0.9,
+                            algorithm = 1) # Using optimized resolution from code below
+  
+  # Add metadata back from two original seurat objects
+  
+  wu_meta$barcode <- paste0('human_', rownames(wu_meta))
+  mycpten_meta$barcode <- paste0('mouse_', rownames(mycpten_meta))
+  
+  so_rliger_meta <- so_rliger@meta.data
+  so_rliger_meta$barcode <- rownames(so_rliger_meta)
+  so_rliger_meta <- full_join(x = so_rliger_meta,
+                              y = wu_meta,
+                              by = 'barcode',
+                              suffix = c('', ''))
+  
+  so_rliger_meta <- left_join(x = so_rliger_meta,
+                              y = mycpten_meta,
+                              by = 'barcode',
+                              suffix = c('', ''))
+  
+  so_rliger_meta$species <- str_split(so_rliger_meta$barcode, pattern = '_', simplify = TRUE)[,1]
+  
+  
+  so_rliger@meta.data <- so_rliger_meta
+  rownames(so_rliger@meta.data) <- so_rliger_meta$barcode
+  
+}
+```
+
+# Optimize silhouette width on integrated seurat object NOTE: can't run leiden algorithm, reverting to louvain (leiden requires conversion to dense matrix format)
+
+## Prepare silhoutte scoring function
+
+```{r}
+library(bluster)
+
+cluster_sweep <- function(resolution = seq(from = 0.3, to = 0.8, by = 0.1), seurat_object, embedding, ndims = ncol(emedding)){
+  
+  
+  for(i in resolution){
+    seurat_object <- FindClusters(seurat_object,
+                                resolution = i,
+                                algorithm = 1)
+  
+    p1 <- DimPlot(seurat_object,
+                  group.by = 'seurat_clusters',
+                  label = TRUE)+
+      coord_equal()+
+      ggtitle(paste0('Resolution: ', resolution[i]))
+    
+    print(p1)
+    
+    curr_clusters <- seurat_object@meta.data$seurat_clusters 
+    
+    sil <- approxSilhouette(x = embedding,
+                            clusters = curr_clusters)
+    
+    boxplot(split(sil$width, curr_clusters),
+            main = paste0('Resolution: ', i, '\n Mean sil.width: ', mean(sil$width)))
+    
+    best.choice <- ifelse(sil$width > 0,
+                          curr_clusters,
+                          sil$other)
+    
+    table(Assigned=curr_clusters, Closest=best.choice)
+    
+    # 
+    rmsd <- clusterRMSD(embedding, curr_clusters)
+    barplot(rmsd,
+            main = paste0('Resolution: ', i, '\n Mean rmsd: ', mean(rmsd)))
+    
+    
+    if(i == resolution[1]){
+      qc <- tibble(res = i,
+                   n_clusters = length(unique(sil$cluster)),
+                   mean_sil_width = mean(sil$width),
+                   mean_rmsd = mean(rmsd))
+    }else{
+      qc <- rbind(qc,
+                  tibble(res = i,
+                  n_clusters = length(unique(sil$cluster)),
+                  mean_sil_width = mean(sil$width),
+                  mean_rmsd = mean(rmsd)))
+    }
+    
+  }
+  return(qc)
+}
+```
+
+## Find best silhouette width
+```{r}
+cluster_qc <- cluster_sweep(seurat_object = so_rliger,
+                            embedding = so_rliger@reductions$inmf@cell.embeddings,
+                            resolution = seq(from = 0.3, to = 1.2, by = 0.1))
+
+cluster_qc_gathered <- cluster_qc %>%
+  gather(- c(res), value = 'value', key = 'metric')
+
+ggplot(cluster_qc_gathered, aes(x = res, y = value, color = metric))+
+  geom_point()+
+  geom_line()+
+  theme_bw()+
+  facet_wrap(~metric, ncol = 1, scales = 'free_y')
+```
+
+## Cluster Seurat object and save
+
+```{r, eval = FALSE}
+so_rliger <- FindClusters(so_rliger,
+                          resolution = 0.6,
+                          algorithm = 1)
+
+# Save seurat object as .rds file
+
+saveRDS(so_rliger, 'analysis_files/s5_xspecies_uinmf_so.rds')
+```
+
+
+
+# sessionInfo()
+
+```{r}
+sessionInfo()
+```
+

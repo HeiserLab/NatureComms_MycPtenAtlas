@@ -1,0 +1,54 @@
+---
+title: "s0_package_installations"
+author: "nlc"
+date: "2022-12-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# CRAN packages
+
+```{r}
+install.packages('Matrix', version = '1.5-1')
+install.packages('tidyverse', version = '1.3.2')
+install.packages('Seurat', version = '4.3.0')
+install.packages('ggalluvial', version = '0.12.3')
+install.packages('harmony', version = '0.1.1')
+install.packages('SoupX', version = '1.6.2')
+install.packages('cluster', version = '2.1.4')
+
+# Packages for installing from non-CRAN source
+install.packages('BiocManager')
+install.packages('devtools')
+
+```
+
+# Bioconductor packages
+
+```{r}
+BiocManager::install('org.Mm.eg.db')
+BiocManager::install('bluster')
+BiocManager::install('enrichplot')
+```
+
+
+# Github packages
+
+```{r}
+library(devtools)
+
+install_github('welch-lab/liger')
+install_github('chris-mcginnis-ucsf/DoubletFinder')
+install_github('satijalab/seurat-wrappers')
+install_github('saeyslab/nichenetr')
+install_github('immunogenomics/scPred')
+```
+
+
+```{r}
+sessionInfo()
+```
+

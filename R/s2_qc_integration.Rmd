@@ -1,0 +1,439 @@
+---
+title: "s2_qc_integration"
+author: "nlc"
+date: "9/14/2021"
+output:
+  rmdformats::downcute:
+      self_contained: true
+      highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = 'center', out.width = "90%", fig.asp = 0.52)
+```
+
+<style>
+    body .main-container {
+        max-width: 2160px;
+    }
+</style>
+
+# Experiment & contact info
+
+PIs: Rosalie Sears (searsr@ohsu.edu), Laura Heiser (heiserl@ohsu.edu)
+
+Sample preparation: Zinab Doha (dohaz@ohsu.edu)
+
+Library prep from single cells: Xi Li & Colin Daniel (danielc@ohsu.edu)
+
+Analysis: Nick Calistri (calistri@ohsu.edu)
+
+Sequencing performed by OHSU MPSSR
+
+## Analysis design
+
+- load so_list.rds
+
+- combine all libraries into so_merge
+
+- process so_merge like normal (dimred & clustering)
+
+- Compute qc metrics and calculate cellcycle score
+
+- Analyze doublet calls vs cluster id to see if any clusters are majority doublet
+
+- Filter based on QC metrics and sample ID
+
+- integrate experiments with rLiger
+
+- save integrated so_merge as .rds file
+
+# Set up
+
+## Load libraries
+```{r}
+library(Matrix)
+library(tidyverse)
+library(Seurat)
+library(rliger)
+library(SeuratWrappers)
+library(ggalluvial)
+library(harmony)
+```
+
+## load s1_so_list.rds and set seed
+```{r}
+so_list <- readRDS('analysis_files/s1_seurat_list.rds')
+
+set.seed(2)
+```
+
+## Mouse/tumor stats from README metadata file
+
+```{r}
+# Read in readme with HTO and tumor ID
+lib_meta <- read_csv('library_metadata.csv')
+
+# Add the run_library variable
+lib_meta <- lib_meta %>%
+  mutate(run_library = paste0(mpssr_seq_run_name,
+                              '_',
+                              mpssr_library_name,
+                              str_replace_na(library_suffix, replacement = '')))
+
+lib_meta$mouse_id <- str_split(lib_meta$condition_string, pattern = '_', simplify = TRUE)[,1]
+
+lib_meta$phenotype <- str_replace(lib_meta$mouse_id, pattern = "[:digit:]+", "")
+
+tumor_histology_dict <- lib_meta %>%
+  dplyr::select(condition_string, histology) %>%
+  distinct()
+```
+
+# Merge data and visualize QC metrics
+
+## Merge seurat objects (no integration, simple appending), filter to only SR & SP assigned tumors and add metadata
+
+```{r}
+so_merge <- merge(x = so_list[[1]], y = unlist(so_list)[-1])
+
+# Add metadata: percent.mt, phenotype (from tumor ID)
+so_merge[['percent.mt']] <- PercentageFeatureSet(so_merge, pattern = '^mt-')
+
+so_merge[['percent.ribo']] <- PercentageFeatureSet(so_merge, pattern = '^Rp[sl][[:digit:]]')
+
+so_merge[['phenotype']] <- str_replace(str_split(so_merge@meta.data$tumor,
+                                                 pattern = '_',
+                                                 simplify = TRUE)[,1],
+                                       '[:digit:]+',
+                                       '')
+
+so_merge[['mouse']] <- str_split(so_merge@meta.data$tumor,
+                    pattern = '_',
+                    simplify = TRUE)[,1]
+
+so_merge[['histology']] <- plyr::mapvalues(x = so_merge@meta.data$tumor,
+                                           from = tumor_histology_dict$condition_string,
+                                           to = tumor_histology_dict$histology)
+
+# Filter anything not assigned SP or SR status
+table(so_merge@meta.data$histology)
+
+so_merge <- subset(so_merge, subset = histology %in% c('SR', 'SP'))
+```
+
+## Visualize QC metrics
+
+```{r, fig.asp = 1}
+# QC plots
+FeatureScatter(so_merge, feature1 = 'nFeature_RNA', feature2 = 'nCount_RNA', group.by = 'library_id')+
+  geom_vline(xintercept = 250)
+
+FeatureScatter(so_merge, feature1 = 'percent.mt', feature2 = 'percent.ribo', group.by = 'library_id')
+
+qc_features <- c('nFeature_RNA', 'nCount_RNA', 'nCount_HTO', 'percent.mt', 'percent.ribo')
+
+for(i in qc_features){
+  p1 <- VlnPlot(so_merge,
+                features = i,
+                group.by = 'library_id',
+                pt.size = 0)+
+    theme(legend.position = 'none')
+  print(p1)
+}
+
+# What is our breakdown between library ID and HTO demultiplexed tumor ID
+freq_table_og <- so_merge@meta.data %>%
+  dplyr::select(library_id, tumor) %>%
+  table()
+
+pheatmap::pheatmap(freq_table_og,
+                   display_numbers = freq_table_og,
+                   main = 'Cell counts before QC')
+
+og_counts <- tibble(tumor = colnames(freq_table_og),
+                      count = colSums(freq_table_og),
+                      fraction = colSums(freq_table_og)/sum(freq_table_og))
+
+knitr::kable(og_counts)
+
+so_noqc_meta <- so_merge@meta.data
+```
+
+# QC plots for supplement
+
+```{r, fig.asp = 1}
+
+# Individual feature plots
+## 720x540 output scaled to 2"
+
+ggplot(so_merge@meta.data, aes(x = tumor, y = log10(nCount_RNA), fill = tumor))+
+  geom_boxplot()+
+  theme_bw()+
+  ggtitle('Number of UMIs per cell')
+
+ggplot(so_merge@meta.data, aes(x = tumor, y = nFeature_RNA, fill = tumor))+
+  geom_boxplot()+
+  theme_bw()+
+  geom_hline(yintercept = 250, linetype = 'dashed')+
+  ggtitle('Number of unique features (genes) per cell')
+
+ggplot(so_merge@meta.data, aes(x = tumor, y = percent.mt, fill = tumor))+
+  geom_boxplot()+
+  theme_bw()+
+  geom_hline(yintercept = 25, linetype = 'dashed')+
+  ggtitle('Percent mitochondrial reads')
+
+
+# removal criteria
+## 720x540 scaled to 2"
+
+ggplot(so_merge@meta.data, aes(x = tumor, fill = DF.classifications))+
+  geom_bar(position = 'dodge')+
+  theme_bw()
+
+ggplot(so_merge@meta.data, aes(x = tumor, fill = nFeature_RNA > 250))+
+  geom_bar(position = 'dodge')+
+  theme_bw()
+
+ggplot(so_merge@meta.data, aes(x = tumor, fill = percent.mt < 25))+
+  geom_bar(position = 'dodge')+
+  theme_bw()
+
+```
+
+
+# Trim data based on QC metrics
+
+```{r}
+
+# Subset based on nFeatureRNA > 250 and percent.mt < 25
+
+FeatureScatter(so_merge,
+               feature1 = 'nFeature_RNA',
+               feature2 = 'percent.mt',
+               group.by = 'library_id')+
+  geom_vline(xintercept = 250)+
+  geom_hline(yintercept = 25)
+
+ggplot(so_merge@meta.data, aes(x = nFeature_RNA, y = percent.mt, color = tumor))+
+  geom_point()+
+  facet_grid(DF.classifications~library_id)+
+  theme_bw()
+
+
+meta_filtered <- so_merge@meta.data %>%
+  filter(nFeature_RNA > 250) %>%
+  filter(percent.mt < 25) %>%
+  filter(DF.classifications == 'Singlet')
+
+so_trimmed <- subset(so_merge,
+                     cells = row.names(so_merge@meta.data)[! row.names(so_merge@meta.data) %in% row.names(meta_filtered)])
+
+so_merge <- subset(so_merge,
+                   cells = row.names(meta_filtered))
+
+# Look at what is left
+freq_table <- so_merge@meta.data %>%
+  dplyr::select(library_id, tumor) %>%
+  table()
+
+pheatmap::pheatmap(freq_table,
+                   display_numbers = freq_table,
+                   main = 'Cell counts after QC')
+
+new_counts <- tibble(tumor = colnames(freq_table),
+                      count = colSums(freq_table),
+                      fraction = colSums(freq_table)/sum(freq_table))
+
+qc_counts <- full_join(x = og_counts,
+                       y = new_counts,
+                       by = 'tumor',
+                       suffix = c('.og', '.qc'))
+
+qc_counts <- qc_counts %>%
+  dplyr::select(-fraction.og, -fraction.qc) %>%
+  mutate(count.removed = count.og - count.qc) %>%
+  mutate(fraction.remain = count.qc/count.og)
+
+knitr::kable(qc_counts)
+
+
+## Alluvial plot of library/mouse/tumor
+meta_alluvial <- so_merge@meta.data %>%
+  group_by(library_id, phenotype, mouse, tumor, HTO_classification.global, histology) %>%
+  summarize(n_cells = n())
+
+ggplot(meta_alluvial, aes(y = n_cells, axis1 = library_id, axis2 = mouse, axis3 = tumor, axis4 = histology, fill = histology))+
+  geom_alluvium()+
+  geom_stratum()+
+  geom_label(stat = "stratum", aes(label = after_stat(stratum)))+
+  theme_minimal()+
+  scale_x_discrete(limits = c('library', 'mouse', 'tumor', 'histology'))
+
+
+# Sample breakdown
+
+sample_stats <- so_merge@meta.data %>%
+  group_by(histology) %>%
+  dplyr::select(histology, tumor) %>%
+  table()
+```
+
+## Visualize what was removed (excluding doublets)
+
+```{r}
+so_trimmed <- FindVariableFeatures(so_trimmed)
+so_trimmed <- NormalizeData(so_trimmed)
+so_trimmed <- ScaleData(so_trimmed)
+
+so_trimmed <- RunPCA(so_trimmed)
+ElbowPlot(so_trimmed)
+so_trimmed <- RunUMAP(so_trimmed, dims = 1:10)
+
+DimPlot(so_trimmed, group.by = 'phenotype')+
+  coord_equal()
+
+FeaturePlot(so_trimmed,
+            features = c('nCount_RNA', 'nFeature_RNA', 'percent.mt', 'Hba-a1'),
+            coord.fixed = TRUE)
+
+FeaturePlot(so_trimmed,
+            features = c('percent.mt', 'Hba-a1', 'Ptprc', 'Epcam'),
+            coord.fixed = TRUE)
+```
+
+
+### Remove old seurat objects/lists and run GC
+
+```{r}
+so_trimmed <- NULL
+so_list <- NULL
+gc()
+```
+
+# QC stats table for supplement
+```{r}
+# Stats table
+
+so_tumor_stats <- so_merge@meta.data %>%
+  group_by(tumor) %>%
+  summarize(nCells = n(),
+            mean_nCount_RNA = mean(nCount_RNA),
+            mean_nFeature_RNA = mean(nFeature_RNA),
+            mean_percent.mt = mean(percent.mt)) 
+
+so_tumor_stats %>%
+  DT::datatable()
+
+# Statistics used in results text
+
+## Number of tumors
+length(unique(so_merge@meta.data$tumor))
+
+## Number of mice
+length(unique(so_merge@meta.data$mouse))
+
+## Number of unique libraries
+length(unique(so_merge@meta.data$library_id))
+
+## Mean and range number of cells per tumor
+range(so_tumor_stats$nCells)
+sum(so_tumor_stats$nCells)
+
+## Mean genes per cell
+mean(so_merge@meta.data$nFeature_RNA)
+mean(so_merge@meta.data$nCount_RNA)
+
+```
+
+
+
+# Integration with rliger and harmony (runs both)
+
+```{r}
+if(file.exists('analysis_files/s2_vehicle_integrated.rds')){
+  print('Loading existing s2_vehicle_integrated.rds file')
+  so_merge <- readRDS('analysis_files/s2_vehicle_integrated.rds')
+}else{
+  print('so_merge_rliger.rds file not found.')
+  print('Processing iNMF integration, 200k cells ~= 1 hour')
+  
+  #iNMF integration with rliger
+  so_merge <- NormalizeData(so_merge)
+  so_merge <- FindVariableFeatures(so_merge)
+  so_merge <- ScaleData(so_merge,
+                        split.by = 'library_id',
+                        do.center = FALSE)
+  
+  so_merge <- RunOptimizeALS(so_merge,
+                             k = 50,
+                             lambda = 5,
+                             split.by = 'library_id',
+                             nrep = 5)
+  
+  so_merge <- RunQuantileNorm(so_merge,
+                              split.by = 'library_id')
+  
+  # UMAP
+  so_merge <- RunUMAP(so_merge,
+                      dims = 1:ncol(so_merge[['iNMF']]),
+                      reduction = 'iNMF')  
+  
+  # Harmony integration
+  so_merge <- RunPCA(so_merge)
+  
+  so_merge <- RunHarmony(so_merge, 
+                       group.by.vars = 'library_id',
+                       plot_convergence = TRUE,
+                       max.iter.harmony = 20)
+  
+  
+  # Save output
+  saveRDS(so_merge, file = 'analysis_files/s2_vehicle_integrated.rds')
+}
+```
+
+# UMAP assessment of iNMF integration
+```{r}
+DimPlot(so_merge,
+        label = TRUE,
+        group.by = 'library_id')+
+  coord_equal()
+
+DimPlot(so_merge,
+        label = TRUE,
+        group.by = 'library_id')+
+  coord_equal()+
+  facet_wrap(~library_id)
+
+DimPlot(so_merge,
+        label = TRUE,
+        group.by = 'histology')+
+  coord_equal()
+
+DimPlot(so_merge,
+        label = TRUE,
+        group.by = 'histology')+
+  coord_equal()+
+  facet_wrap(~histology)
+
+DimPlot(so_merge,
+        label = TRUE,
+        group.by = 'tumor')+
+  coord_equal()
+
+DimPlot(so_merge,
+        label = TRUE,
+        group.by = 'tumor')+
+  coord_equal()+
+  facet_wrap(~tumor)
+```
+
+
+# sessionInfo()
+
+```{r}
+sessionInfo()
+```
+

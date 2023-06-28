@@ -1,0 +1,1244 @@
+---
+title: "s6_220301_manuscript_figures"
+author: "nlc"
+date: "3/1/2022"
+output:
+  rmdformats::downcute:
+      self_contained: true
+      highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = 'center', out.width = "90%", fig.asp = 0.52, fig.retina = 3)
+```
+
+<style>
+    body .main-container {
+        max-width: 2160px;
+    }
+</style>
+
+
+# Set up
+
+## Load libraries
+```{r}
+library(tidyverse)
+library(Seurat)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+```
+## set seed
+
+```{r}
+set.seed(6)
+```
+
+
+## load s3_celltypes.rds
+
+```{r}
+so_merge <- readRDS('analysis_files/s4_so_merge.rds')
+
+```
+
+## Create cluster / celltype dictionary
+
+```{r}
+# Colors for clusters
+color_dict <- so_merge@meta.data %>%
+  dplyr::select(lineage, cluster_l2, celltype_full) %>%
+  distinct() %>%
+  arrange(lineage, cluster_l2)
+
+color_dict$color <- scales::hue_pal()(nrow(color_dict))
+
+color_dict <- color_dict %>%
+  arrange(cluster_l2)
+
+# Colors for lineage
+lineage_color_dict <- so_merge@meta.data %>%
+  dplyr::select(lineage) %>%
+  distinct() %>%
+  arrange(lineage)
+
+lineage_color_dict$color <- scales::hue_pal()(nrow(lineage_color_dict))
+
+lineage_cols <- lineage_color_dict$color
+names(lineage_cols) <- lineage_color_dict$lineage
+
+# Colors for species
+species_cols <- RColorBrewer::brewer.pal(n = 3, name = 'Set1')[1:2]
+names(species_cols) <- c('mouse', 'human')
+
+```
+
+# Figure 6
+
+## Figure 6A - lineage & cluster umap
+
+1200 x 600 pixels
+
+```{r, fig.asp = 1}
+
+p1 <- DimPlot(so_merge,
+        group.by = 'lineage',
+        label = FALSE,
+        repel = TRUE,
+        cols = lineage_color_dict$color)+
+    coord_equal()+
+  ggtitle('Lineage')+
+  theme(plot.title = element_text(size = 25, face = 'bold'),
+        legend.text = element_text(face = 'bold'))+
+  guides(color = guide_legend(override.aes = list(size = 7)))
+
+p2 <- DimPlot(so_merge,
+        group.by = 'seurat_clusters',
+        label = TRUE,
+        label.size = 6,
+        repel = FALSE,
+        cols = color_dict$color)+
+  coord_equal()+
+  ggtitle('Unsupervised Clusters')+
+  theme(plot.title = element_text(size = 25, face = 'bold'),
+        legend.position = 'none')
+
+p2+p1
+
+```
+
+## Figure 6B - Tumor-celltype distribution
+
+```{r}
+# Pull metadata and construct tumor<->cellfrac_type dictionary
+so_merge_meta <- so_merge@meta.data
+
+tumor_cellfrac <- so_merge_meta %>%
+  dplyr::select(tumor, cellfrac_type) %>%
+  distinct()
+
+# compute lineage proportions & join with tumor<->cellfrac_type dictionary
+props <- so_merge_meta %>%
+  dplyr::select(lineage, tumor) %>%
+  table() %>%
+  prop.table(., margin = 2)
+
+prop_gather <- as_tibble(props)
+
+prop_gather <- full_join(x = prop_gather,
+                         y = tumor_cellfrac,
+                         by = 'tumor',
+                         suffix = c('', ''))
+
+f6b <- ggplot(prop_gather, aes(x = tumor, y = n, fill = lineage))+
+  geom_col()+
+  theme_bw()+
+  facet_grid(~cellfrac_type, scales = 'free_x', space = 'free_x')+
+  ylab('Fraction of tumor')+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave("fig6b.png", f6b, height = 3, width = 4.5, dpi = 500)
+```
+
+## Figure 6C - Distribution of unsupervised clusters (cell types)
+
+1080 x 540
+
+```{r}
+so_meta <- so_merge@meta.data
+
+so_meta_tumors <- so_meta %>%
+  dplyr::select(celltype_full, cellfrac_type, lineage, tumor) %>%
+  group_by(tumor, cellfrac_type, celltype_full, lineage) %>%
+  summarize(n_cells = n()) %>%
+  group_by(tumor) %>%
+  mutate(freq = n_cells/sum(n_cells))
+
+so_meta_tumors_grouped <- so_meta_tumors %>%
+  group_by(cellfrac_type, celltype_full) %>%
+  mutate(mean_freq = mean(freq)) %>%
+  mutate(freq_error_ymin = mean(freq) - sd(freq)) %>%
+  mutate(freq_error_ymax = mean(freq) + sd(freq))
+
+so_meta_tumors_summary <- so_meta_tumors %>%
+  group_by(cellfrac_type, celltype_full) %>%
+  summarize(tumor_count = n(),
+            mean_freq = mean(freq),
+            freq_sd_ymin = mean(freq) - sd(freq),
+            freq_sd_ymax = mean(freq) + sd(freq),
+            freq_sem_ymin = mean(freq) - sd(freq)/(tumor_count)^0.5,
+            freq_sem_ymax = mean(freq) + sd(freq)/(tumor_count)^0.5,
+            lineage = lineage)
+
+# mean freq of tumor
+ggplot(so_meta_tumors_summary, aes(y = mean_freq, x = celltype_full, fill = cellfrac_type))+
+  geom_col(position = 'dodge')+
+  geom_point(data = so_meta_tumors, aes(x = celltype_full, y = freq), color = 'gray50', size = 1.5)+
+  theme_bw()+
+  geom_errorbar(aes(x = celltype_full, ymin = freq_sem_ymin, ymax = freq_sem_ymax), position = 'dodge', width = 0.5)+
+  facet_grid(rows = vars(cellfrac_type), cols = vars(lineage), scales = 'free_x', space = 'free_x')+
+  theme(strip.text.x = element_text(angle = 90))+
+  ylab('Mean frequency \n (fraction of tumor)')+
+  xlab('Celltype \n (cluster-celltype)')+
+  RotatedAxis()
+
+```
+
+## Fig 6D: UMAP by lineage
+
+```{r}
+## epi
+so_epi <- subset(so_merge, subset = lineage == 'epithelial')
+so_epi <- RunUMAP(so_epi, reduction = 'iNMF', dims = 1:50)
+DimPlot(so_epi,
+        group.by = 'celltype_full',
+        label = TRUE,
+        label.size = 5)+
+  coord_equal()+
+  ggtitle('Epithelial')
+
+VlnPlot(so_epi,
+        features = c('Myc', 'Pten'))
+
+## fibro
+so_fibro <- subset(so_merge, subset = lineage == 'fibroblast')
+so_fibro <- RunUMAP(so_fibro, reduction = 'iNMF', dims = 1:50)
+DimPlot(so_fibro,
+        group.by = 'celltype_full',
+        label = TRUE,
+        label.size = 5)+
+  coord_equal()+
+  ggtitle('Fibroblast')
+
+## lym
+so_lym <- subset(so_merge, subset = lineage == 'lymphoid')
+so_lym <- RunUMAP(so_lym, reduction = 'iNMF', dims = 1:50)
+DimPlot(so_lym,
+        group.by = 'celltype_full',
+        label = TRUE,
+        label.size = 5)+
+  coord_equal()+
+  ggtitle('Lymphoid')
+
+## mye
+so_mye <- subset(so_merge, subset = lineage == 'myeloid')
+so_mye <- RunUMAP(so_mye, reduction = 'iNMF', dims = 1:50)
+DimPlot(so_mye,
+        group.by = 'celltype_full',
+        label = TRUE,
+        label.size = 5,
+        repel = TRUE)+
+  coord_equal()+
+  ggtitle('Myeloid')
+```
+
+## Figure 6E+6F: Epithelial heatmap + ego
+
+720 x 720 heatmap
+
+540 x 540 emapplot
+```{r}
+library(enrichplot)
+
+
+so_epi <- subset(so_merge, subset = lineage == 'epithelial')
+
+epi_markers <- read_csv('analysis_files/s4_epithelial_markers.csv')
+
+top_epi_markers <- epi_markers %>%
+  group_by(cluster) %>%
+  filter(p_val_adj <= 0.01) %>%
+  arrange(desc(avg_log2FC)) %>%
+  slice_head(n = 5)
+
+DoHeatmap(so_epi,
+          features = top_epi_markers$gene)+
+  ggtitle('Top epithelial genes')
+
+DotPlot(so_epi,
+        features = top_epi_markers$gene,
+        group.by = 'celltype_full',
+        cols = 'RdYlBu')+
+  RotatedAxis()
+
+epi_plots <- list()
+
+for(i in unique(epi_markers$cluster)){
+
+  # Identify current DEG
+ curr_markers <- epi_markers %>%
+    filter(cluster == i) %>%
+  mutate(significantly_upregulated = avg_log2FC > 0.5 & p_val_adj <= 0.01)
+ 
+ # extract significant DEG
+ top_curr <- curr_markers %>%
+  filter(avg_log2FC >= .5 & p_val_adj <= 0.01)
+ 
+
+  ego_curr <- enrichGO(top_curr$gene,
+                  OrgDb = org.Mm.eg.db,
+                  keyType = 'SYMBOL',
+                  ont = 'ALL')
+  
+  ego_curr <- pairwise_termsim(ego_curr)
+  
+  
+  p1 <- ggplot(curr_markers, aes(x = avg_log2FC, y = -log10(p_val_adj), label = gene, color = significantly_upregulated))+
+    geom_point()+
+    ggrepel::geom_text_repel()+
+    theme_bw()+
+    ylab('Significance \n [ -log10(p_val_adj) ]')+
+    xlab('Average log2 Fold Change')+
+    ggtitle(paste0(i, ' vs all other epithelial'))+
+    theme(legend.position = 'bottom')+
+    labs(color = 'Significantly Upregulated')+
+    scale_color_manual(values = c('black', 'red'))
+  
+  p2 <- treeplot(ego_curr)
+  p3 <- dotplot(ego_curr)
+  p4 <- emapplot(ego_curr,
+         cex_label_category = 0.5,
+         repel = TRUE,
+         group_category = FALSE)+
+    ggtitle(paste0('Cluster ', i, ' top ontologies'))
+  
+  # display plots in loop
+  print(p1)
+  print(p2)
+  print(p3)
+  print(p4)
+  
+  # stash plots for access later
+  epi_plots[[as.character(i)]]$volcano <- p1
+  epi_plots[[as.character(i)]]$tree <- p2
+  epi_plots[[as.character(i)]]$dot <- p3
+  epi_plots[[as.character(i)]]$emap <- p4
+  
+}
+```
+
+
+## Figure 6G+6H: Heatmap of Fibroblast markers + Enrichment plot
+
+dotplot: 600 x 480
+
+```{r}
+
+so_fibro <- subset(so_merge, subset = lineage == 'fibroblast')
+
+fibro_markers <- read_csv('analysis_files/s4_fibro_markers.csv')
+
+top_fibro_markers <- fibro_markers %>%
+  group_by(cluster) %>%
+  filter(p_val_adj <= 0.01) %>%
+  arrange(desc(avg_log2FC)) %>%
+  slice_head(n = 10)
+
+DoHeatmap(so_fibro,
+          features = top_fibro_markers$gene)+
+  ggtitle('Top fibroblast genes')
+
+fibro_plots <- list()
+
+for(i in unique(fibro_markers$cluster)){
+
+  # Identify current DEG
+ curr_markers <- fibro_markers %>%
+    filter(cluster == i) %>%
+  mutate(significantly_upregulated = avg_log2FC > 0.5 & p_val_adj <= 0.01)
+ 
+ # extract significant DEG
+ top_curr <- curr_markers %>%
+  filter(avg_log2FC >= .5 & p_val_adj <= 0.01)
+  
+ # Enrichment of gene ontology using MSIGDB
+  ego_curr <- enrichGO(top_curr$gene,
+                  OrgDb = org.Mm.eg.db,
+                  keyType = 'SYMBOL',
+                  ont = 'ALL')
+  
+  ego_curr <- pairwise_termsim(ego_curr)
+  
+  # Generate plots
+  p1 <- ggplot(curr_markers, aes(x = avg_log2FC, y = -log10(p_val_adj), label = gene, color = significantly_upregulated))+
+    geom_point()+
+    ggrepel::geom_text_repel()+
+    theme_bw()+
+    ylab('Significance \n [ -log10(p_val_adj) ]')+
+    xlab('Average log2 Fold Change')+
+    ggtitle(paste0(i, ' vs all other fibroblast'))+
+    theme(legend.position = 'bottom')+
+    labs(color = 'Significantly Upregulated')+
+    scale_color_manual(values = c('black', 'red'))
+  
+  p2 <- treeplot(ego_curr)
+  p3 <- dotplot(ego_curr)
+  p4 <- emapplot(ego_curr,
+         cex_label_category = 0.5,
+         repel = TRUE,
+         group_category = FALSE)+
+    ggtitle(paste0('Cluster ', i, ' top ontologies'))
+  
+  # display plots in loop
+  print(p1)
+  print(p2)
+  print(p3)
+  print(p4)
+  
+  # stash plots for access later
+  fibro_plots[[as.character(i)]]$volcano <- p1
+  fibro_plots[[as.character(i)]]$tree <- p2
+  fibro_plots[[as.character(i)]]$dot <- p3
+  fibro_plots[[as.character(i)]]$emap <- p4
+  
+}
+
+```
+
+# Figure 7:
+
+## Fig 7B: ScPred classification of murine clusters
+
+900 x 800
+
+```{r}
+so_merge_scpred <- readRDS('analysis_files/s5_so_merge_subset_mda_scpred.rds')
+
+freq <- so_merge_scpred@meta.data %>%
+  dplyr::select(celltype_full, scpred_prediction) %>%
+  table()
+
+row.names(freq) <- paste0('MM: ', row.names(freq))
+colnames(freq) <- paste0('HS: ', colnames(freq))
+
+row_anno <- so_merge_scpred@meta.data %>%
+  dplyr::select(lineage, celltype_full) %>%
+  distinct() %>%
+  mutate(celltype_full = paste0('MM: ', celltype_full))
+
+row_anno <- data.frame(lineage = row_anno$lineage,
+                       row.names = row_anno$celltype_full)
+
+pheatmap::pheatmap(prop.table(freq, margin = 1),
+                   annotation_row = row_anno,
+                   main = 'scPred assignment \n Row fraction',
+                   color = colorRampPalette(c('white', 'black'))(50),
+                   annotation_colors = list(lineage = lineage_cols))
+
+
+# ARI of matrix without epithelial cells
+scpred_stroma <- so_merge_scpred@meta.data %>%
+  filter(lineage != 'epithelial')
+
+aricode::ARI(c1 = scpred_stroma$celltype_full,
+             c2 = scpred_stroma$scpred_prediction)
+
+# ARI of only epithelial cells
+scpred_epi <- so_merge_scpred@meta.data %>%
+  filter(lineage == 'epithelial')
+
+aricode::ARI(c1 = scpred_epi$celltype_full,
+             c2 = scpred_epi$scpred_prediction)
+
+# Remove so to reclaim memory
+rm(so_merge_scpred)
+```
+
+## Figure 7c: Integrated data iNMF score vs celltype/cluster
+
+### Load integrated data and prepare metadata
+```{r}
+so_rliger <- readRDS('analysis_files/s5_xspecies_uinmf_so.rds')
+
+so_rliger@meta.data$species <- str_split(rownames(so_rliger@meta.data), pattern = '_', simplify = TRUE)[,1]
+
+celltype_major_l1_dict <- rbind(c('Endothelial', 'endothelial'),
+                                c('CAFs', 'fibroblast'),
+                                c('PVL', 'perivascular'),
+                                c('B-cells', 'lymphoid'),
+                                c('T-cells', 'lymphoid'),
+                                c('Myeloid', 'myeloid'),
+                                c('Normal Epithelial', 'epithelial'),
+                                c('Plasmablasts', 'lymphoid'),
+                                c('Cancer Epithelial', 'epithelial'))
+
+# Convert celltype_major to celltype_l1
+
+so_rliger@meta.data$celltype_major_to_l1[so_rliger@meta.data$species == 'human'] <- plyr::mapvalues(so_rliger@meta.data$celltype_major[so_rliger@meta.data$species == 'human'],
+                                                     from = celltype_major_l1_dict[,1],
+                                                     to = celltype_major_l1_dict[,2])
+
+# Combine celltype_l1 from each species
+so_rliger@meta.data <- tidyr::unite(data = so_rliger@meta.data,
+                                    col = 'celltype_l1.5',
+                                    celltype_major_to_l1,
+                                    lineage,
+                                    na.rm = TRUE,
+                                    sep = '',
+                                    remove = FALSE)
+
+# Combine celltype_l2 and celltype_minor
+so_rliger@meta.data <- tidyr::unite(data = so_rliger@meta.data,
+                                    col = 'celltype_l2.5',
+                                    celltype_full,
+                                    celltype_minor,
+                                    na.rm = TRUE,
+                                    sep = '',
+                                    remove = FALSE)
+
+# Combine human 'subtype' and mouse 'cellfrac_type' 
+so_rliger@meta.data <- tidyr::unite(data = so_rliger@meta.data,
+                                    col = 'tumor_subtype',
+                                    subtype,
+                                    cellfrac_type,
+                                    na.rm = TRUE,
+                                    sep = '',
+                                    remove = FALSE)
+
+# Combine human 'Patient' and mouse 'cellfrac_type' 
+so_rliger@meta.data <- tidyr::unite(data = so_rliger@meta.data,
+                                    col = 'sample_id',
+                                    Patient,
+                                    tumor,
+                                    na.rm = TRUE,
+                                    sep = '',
+                                    remove = FALSE)
+
+# Add species label to celltype_l2.5
+
+so_rliger@meta.data$species_celltype <- paste0(recode(so_rliger@meta.data$species,
+                                                      'mouse' = 'MM: ',
+                                                      'human' = 'HS: '),
+                                               so_rliger@meta.data$celltype_l2.5)
+
+
+species_celltype_dict <- so_rliger@meta.data %>%
+  dplyr::select(species, celltype_l2.5) %>%
+  distinct()
+
+
+
+```
+
+1200 x 1100
+
+```{r}
+# Average iNMF embedding to show relationship to cluster, annotated by celltype_l1
+
+cluster_embedding <- tibble(seurat_clusters = so_rliger@meta.data$species_celltype) %>%
+  cbind(so_rliger@reductions$inmf@cell.embeddings) %>%
+  group_by(seurat_clusters) %>%
+  summarize(across(everything(), list(mean)))
+
+row_anno_tibble <- so_rliger@meta.data %>%
+  dplyr::select(species_celltype, celltype_l1.5, species) %>%
+  distinct()
+
+row_anno <- data.frame(species = row_anno_tibble$species,
+                       lineage = row_anno_tibble$celltype_l1.5,
+                       row.names = row_anno_tibble$species_celltype)
+
+
+pheatmap::pheatmap(t(scale(t(data.frame(cluster_embedding[,2:ncol(cluster_embedding)],
+                              row.names = cluster_embedding$seurat_clusters)))),
+                   scale = 'none',
+                   main = 'Average UINMF embedding per cluster \n row z-scored',
+                   annotation_row = row_anno,
+                   annotation_colors = list(lineage = lineage_cols,
+                                            species = species_cols))
+```
+
+## Figure 7D: Original cluster/celltype vs integrated cluster
+
+1200 x 1200
+
+```{r, fig.asp = 1}
+clust_lineage <- so_rliger@meta.data %>%
+  dplyr::select(RNA_snn_res.0.6, celltype_l1.5) %>%
+  table()
+
+clust_lineage_prop <- prop.table(clust_lineage, margin = 1)
+
+for(i in 1:nrow(clust_lineage_prop)){
+  
+  if(max(clust_lineage_prop[i,]) > 0.8){
+    curr_lineage <- names(which.max(clust_lineage_prop[i,]))
+  }else{
+    curr_lineage <- 'mixed'
+  }
+  
+  if(i == 1){
+    cluster_lineage_dict <- tibble(cluster = row.names(clust_lineage_prop)[i],
+                                   consensus_lineage = curr_lineage)
+  }else{
+    cluster_lineage_dict <- rbind(cluster_lineage_dict,
+                                  tibble(cluster = row.names(clust_lineage_prop)[i],
+                                         consensus_lineage = curr_lineage))
+  }
+}
+
+consensus_lineage_cols <- RColorBrewer::brewer.pal(n = length(unique(cluster_lineage_dict$consensus_lineage)), 'Set1')
+names(consensus_lineage_cols) <- unique(cluster_lineage_dict$consensus_lineage)
+
+so_rliger_meta <- so_rliger@meta.data
+
+freq_table <- so_rliger_meta %>%
+  dplyr::select(species_celltype, RNA_snn_res.0.6) %>%
+  table()
+
+
+row_anno <- so_rliger_meta %>% 
+  dplyr::select(species_celltype, species, celltype_l1.5) %>%
+  distinct()
+
+row_anno <- data.frame(species = row_anno$species,
+                       lineage = row_anno$celltype_l1.5,
+                       row.names = row_anno$species_celltype)
+
+row_anno$lineage <- factor(row_anno$lineage, levels = unique(cluster_lineage_dict$consensus_lineage))
+
+col_anno <- data.frame(row.names = cluster_lineage_dict$cluster,
+                       consensus_lineage = cluster_lineage_dict$consensus_lineage)
+
+anno_colors <- list(lineage = lineage_cols,
+                    consensus_lineage = consensus_lineage_cols,
+                    species = species_cols)
+
+col_order <- cluster_lineage_dict %>%
+  arrange(consensus_lineage, cluster)
+
+pheatmap::pheatmap(prop.table(freq_table, margin = 1),
+                   annotation_row = row_anno,
+                   annotation_col = col_anno,
+                   annotation_colors = anno_colors,
+                   color = colorRampPalette(colors = c('white', 'black'))(100),
+                   main = 'Original identity versus integrated cluster \n (Row fraction)',
+                   cluster_cols = TRUE)
+
+```
+
+## Figure 7E: Integrated UMAP colored by lineage
+
+```{r}
+DimPlot(so_rliger,
+        group.by = 'celltype_l1.5',
+        label = FALSE,
+        repel = TRUE,
+        cols = lineage_color_dict$color)+
+    coord_equal()+
+  ggtitle('Lineage')+
+  theme(plot.title = element_text(size = 25, face = 'bold'),
+        legend.text = element_text(face = 'bold'))+
+  guides(color = guide_legend(override.aes = list(size = 7)))
+```
+
+
+## Figure 7F: UMAP split by species
+480 x 480 per umap
+
+```{r}
+# Randomly subset to an equivalent number
+
+species_count <- table(so_rliger@meta.data$species)
+
+mouse_barcodes <- so_rliger@meta.data %>%
+  mutate(cell_id = rownames(so_rliger@meta.data)) %>%
+  filter(species == 'mouse') %>%
+  dplyr::select(cell_id) %>%
+  pull()
+
+set.seed(6)
+human_barcodes <- so_rliger@meta.data %>%
+  mutate(cell_id = rownames(so_rliger@meta.data)) %>%
+  filter(species == 'human') %>%
+  mutate(random_n = sample(species_count[1])) %>%
+  filter(random_n <= species_count[2]) %>%
+  dplyr::select(cell_id) %>%
+  pull()
+
+so_rliger_subset <- subset(so_rliger, cells = c(mouse_barcodes, human_barcodes))
+
+DimPlot(so_rliger_subset,
+        group.by = 'RNA_snn_res.0.6',
+        label = TRUE,
+        label.size = 5,
+        split.by = 'species')+
+    coord_equal()+
+    theme(legend.position = 'none')+
+  ggtitle('Unsupervised clusters \n (subset to equal n)')
+
+```
+
+# Supplementary Figure 13:
+
+## S13D: Integrated scRNAseq Lineage vs fraction of cluster
+
+1200 x 300
+
+```{r, fig.asp = 1}
+clust_lineage <- so_rliger@meta.data %>%
+  dplyr::select(RNA_snn_res.0.6, celltype_l1.5) %>%
+  table()
+
+clust_lineage_prop <- prop.table(clust_lineage, margin = 1)
+
+pheatmap::pheatmap(t(clust_lineage_prop),
+                   display_numbers = round(t(clust_lineage_prop),2),
+                   main = 'Fraction of lineage per cluster',
+                   color = colorRampPalette(colors = c('white', 'black'))(100))
+
+for(i in 1:nrow(clust_lineage_prop)){
+  
+  if(max(clust_lineage_prop[i,]) > 0.8){
+    curr_lineage <- names(which.max(clust_lineage_prop[i,]))
+  }else{
+    curr_lineage <- 'mixed'
+  }
+  
+  if(i == 1){
+    cluster_lineage_dict <- tibble(cluster = row.names(clust_lineage_prop)[i],
+                                   consensus_lineage = curr_lineage)
+  }else{
+    cluster_lineage_dict <- rbind(cluster_lineage_dict,
+                                  tibble(cluster = row.names(clust_lineage_prop)[i],
+                                         consensus_lineage = curr_lineage))
+  }
+}
+
+
+```
+
+
+
+## Patient breakdown
+
+```{r}
+meta_human <- so_rliger@meta.data %>%
+  filter(species == 'human') %>%
+  mutate(og_label = celltype_minor) %>%
+  mutate(sample_id = Patient)
+
+meta_human$celltype_l1 <- plyr::mapvalues(x = meta_human$celltype_major,
+                                          from = celltype_major_l1_dict[,1],
+                                          to = celltype_major_l1_dict[,2])
+
+meta_mouse <- so_rliger@meta.data %>%
+  filter(species == 'mouse') %>%
+  mutate(og_label = celltype_full) %>%
+  mutate(sample_id = tumor)
+
+meta <- rbind(meta_mouse, meta_human)
+
+freq_table <- meta %>%
+  dplyr::select(RNA_snn_res.0.9, sample_id) %>%
+  table()
+
+col_anno <- meta %>%
+  dplyr::select(sample_id, subtype, cellfrac_type, species) %>%
+  distinct()
+
+col_anno <- data.frame(subtype = col_anno$subtype,
+                       cellfrac_type = col_anno$cellfrac_type,
+                       species = col_anno$species,
+                       row.names = col_anno$sample_id)
+
+pheatmap::pheatmap(prop.table(freq_table, margin = 2),
+                   annotation_col = col_anno)
+```
+# Supplementary figure 13
+
+
+
+## S13A - UMAP comparison - no integration, harmony and iNMF
+
+all: 500 x 500
+
+```{r}
+# Harmony
+so_harmony <- RunUMAP(so_merge, dims = 1:50, reduction = 'harmony')
+harmony_umap <- DimPlot(so_harmony,
+                        group.by = 'tumor')
+
+rm(so_harmony)
+
+# No integration
+so_noint <- RunPCA(so_merge)
+so_noint <- RunUMAP(so_noint, dims = 1:50, reduction = 'pca')
+noint_umap <- DimPlot(so_noint,
+                      group.by = 'tumor')+
+  coord_equal()
+rm(so_noint)
+
+# iNMF
+inmf_umap <- DimPlot(so_merge,
+                     group.by = 'tumor')+
+  coord_equal()
+
+
+noint_umap+
+  ggtitle('No integration \n 50 PCs')
+
+harmony_umap+
+  ggtitle('Harmony integrated \n 50 components')
+
+inmf_umap+
+  ggtitle('rLiger integrated \n 50 Factors')
+
+```
+
+## S13B - clustering optimization
+
+Created in s3_clustering_optimization.rmd
+
+## S13C - cluster vs lineage marker dotplot
+
+ 1080x480 pixels
+
+```{r}
+DotPlot(so_merge,
+        features = c('Ptprc', 'Cd74', 'Epcam', 'Cd14', 'Cd3e', 'Pdgfra', 'Krt5', 'Pecam1', 'Mki67', 'Pdgfrb'),
+        cols = 'RdYlBu',
+        group.by = 'cluster_l2')+
+  theme_bw()+
+  coord_flip()
+```
+
+## S13D/E - c14 subset: umap & cluster vs lineage marker dotplot
+
+480 x 480 both
+
+```{r}
+library(harmony)
+c14 <- subset(so_merge,
+              subset = seurat_clusters == 14)
+
+c14 <- FindVariableFeatures(c14)
+c14 <- NormalizeData(c14)
+c14 <- ScaleData(c14)
+c14 <- RunPCA(c14)
+c14 <- RunHarmony(c14,
+                        group.by.vars = 'library_id')
+
+ElbowPlot(c14, reduction = 'harmony')
+
+c14 <- RunUMAP(c14, reduction = 'harmony', dims = 1:5,
+                  seed.use = 500)
+
+DimPlot(c14,
+        label = TRUE,
+        label.size = 6)+
+  ggtitle('Cluster 14 \n (5 Harmony components)')
+
+DotPlot(c14,
+        features = c('Ptprc', 'Cd74', 'Epcam', 'Cd14', 'Cd3e', 'Pdgfra', 'Krt5', 'Pecam1', 'Pdgfrb'),
+        cols = 'RdYlBu',
+        group.by = 'cluster_l2')+
+  theme_bw()+
+  coord_flip()
+```
+
+## S13F: UMAP by cellfrac_type
+
+1080x540
+
+```{r}
+# Find smallest number of cells per cellfrac type
+n_per_cellfrac_type <- so_merge@meta.data %>%
+  group_by(cellfrac_type) %>%
+  summarize(n_cells = n())
+
+n_smallest <- min(n_per_cellfrac_type$n_cells)
+
+# Randomly subsample each cellfrac type
+
+set.seed(7)
+
+sp_barcodes <- so_merge@meta.data %>%
+  mutate(cell_id = rownames(so_merge@meta.data)) %>%
+  filter(cellfrac_type == 'SP') %>%
+  mutate(random_n = sample(nrow(.))) %>%
+  filter(random_n <= n_smallest) %>%
+  dplyr::select(cell_id) %>%
+  pull()
+
+set.seed(8)
+
+srip_barcodes <- so_merge@meta.data %>%
+  mutate(cell_id = rownames(so_merge@meta.data)) %>%
+  filter(cellfrac_type == 'SR_IP') %>%
+  mutate(random_n = sample(nrow(.))) %>%
+  filter(random_n <= n_smallest) %>%
+  dplyr::select(cell_id) %>%
+  pull()
+
+set.seed(9)
+
+srir_barcodes <- so_merge@meta.data %>%
+  mutate(cell_id = rownames(so_merge@meta.data)) %>%
+  filter(cellfrac_type == 'SR_IR') %>%
+  mutate(random_n = sample(nrow(.))) %>%
+  filter(random_n <= n_smallest) %>%
+  dplyr::select(cell_id) %>%
+  pull()
+
+# Plot UMAP by cellfrac type
+
+DimPlot(subset(so_merge, cells = c(sp_barcodes, srip_barcodes, srir_barcodes)),
+        group.by = 'lineage',
+        label = FALSE,
+        split.by = 'cellfrac_type',
+        pt.size = 1.5)+
+    coord_equal()+
+    theme(legend.position = 'bottom')+
+  ggtitle('Lineage by cellfrac_type \n (subset to equal n)')+
+  guides(color = guide_legend(nrow = 1, override.aes = list(size = 5)))
+
+```
+
+## Supplemental 13G
+
+960 x 480 pixels
+
+```{r}
+so_merge_meta <- so_merge@meta.data %>%
+  mutate(tumor_pheno = paste0(tumor, '-', histology))
+
+freq_table <- so_merge_meta %>%
+  dplyr::select(lineage, tumor_pheno) %>%
+  table()
+
+cellfrac_type_dict <- so_merge_meta %>%
+  dplyr::select(cellfrac_type, tumor_pheno) %>%
+  distinct()
+
+col_anno <- tibble(histology = str_split(colnames(freq_table), pattern = '-', simplify = TRUE)[,2],
+                       log10_n_cells = log10(colSums(freq_table)),
+                       tumor_pheno = colnames(freq_table))
+
+col_anno <- full_join(x = col_anno,
+                       y = cellfrac_type_dict,
+                       by = 'tumor_pheno',
+                       suffix = c('', ''))
+
+col_anno <- data.frame(histology = col_anno$histology,
+                       cellfrac_type = col_anno$cellfrac_type,
+                       log10_n_cells = col_anno$log10_n_cells,
+                       row.names = col_anno$tumor_pheno)
+
+
+cellfrac_cols <- scales::hue_pal()(3)
+names(cellfrac_cols) <- c('SP', 'SR_IP', 'SR_IR')
+
+anno_colors <- list(cellfrac_type = cellfrac_cols,
+                   histology = c(SP = 'magenta', SR = 'cyan'))
+
+pheatmap::pheatmap(prop.table(freq_table, margin = 2), 
+                   display_numbers = freq_table,
+                   main = 'column scaled (cell fraction) \n Number = n_cells per celltype per tumor',
+                   annotation_col = col_anno,
+                   annotation_colors = anno_colors)
+```
+
+# Supplementary Figure 14
+
+## S14A - Top DEG dotplot
+
+1920 x 720
+
+```{r, fig.asp = 0.5}
+markers <- read_csv('analysis_files/s3_cluster_l2_markers.csv')
+
+top_markers <- markers %>%
+  filter(p_val_adj <= 0.01) %>%
+  filter(pct.1 >= 0.5) %>%
+  group_by(cluster) %>%
+  arrange(desc(avg_log2FC)) %>%
+  slice_head(n = 3)
+
+DotPlot(so_merge,
+        features = unique(top_markers$gene),
+        cols = 'RdYlBu',
+        group.by = 'celltype_full')+
+  RotatedAxis()
+
+```
+
+## S14B/C -  NMF score vs lineage/cluster
+
+lineage vs iNMF embedding: 1080 x 480
+
+cluster vs iNMF embedding: 1080 x 600
+
+```{r, fig.asp = 1}
+# Average iNMF embeddings to show relationship to celltype_l1
+cluster_embedding <- tibble(lineage = so_merge@meta.data$lineage) %>%
+  cbind(so_merge@reductions$iNMF@cell.embeddings) %>%
+  group_by(lineage) %>%
+  summarize(across(everything(), list(mean)))
+
+pheatmap::pheatmap(t(scale(t(data.frame(cluster_embedding[,2:ncol(cluster_embedding)],
+                              row.names = cluster_embedding$lineage)))),
+                   scale = 'none',
+                   main = 'Average iNMF embedding per cluster \n Z-scored by row')
+
+# Average iNMF embedding to show relationship to cluster, annotated by celltype_l1
+cluster_embedding <- tibble(celltype_full = so_merge@meta.data$celltype_full) %>%
+  cbind(so_merge@reductions$iNMF@cell.embeddings) %>%
+  group_by(celltype_full) %>%
+  summarize(across(everything(), list(mean)))
+
+annotation_rows <- so_merge@meta.data %>%
+  dplyr::select(lineage, celltype_full) %>%
+  group_by_all() %>%
+  distinct()
+
+annotation_rows <- data.frame(celltype = annotation_rows$lineage,
+                              row.names = annotation_rows$celltype_full)
+
+pheatmap::pheatmap(t(scale(t(data.frame(cluster_embedding[,2:ncol(cluster_embedding)],
+                              row.names = cluster_embedding$celltype_full)))),
+                   scale = 'none',
+                   main = 'Average iNMF embedding per cluster \n Z-scored by row',
+                   annotation_row = annotation_rows)
+
+```
+
+## S14D: Fraction of tumor by lineage (only lineages with >1 cluster)
+
+```{r}
+
+so_meta <- so_merge@meta.data
+
+subtype_counts <- so_meta %>%
+  dplyr::select(tumor, cellfrac_type) %>%
+  distinct() %>%
+  group_by(cellfrac_type) %>%
+  summarize(n_tumors = n())
+
+so_meta_tumors <- so_meta %>%
+  filter(lineage %in% c('epithelial', 'fibroblast', 'lymphoid', 'myeloid')) %>%
+  dplyr::select(celltype_full, cellfrac_type, lineage, tumor) %>%
+  group_by(tumor, cellfrac_type, celltype_full, lineage) %>%
+  summarize(n_cells = n()) %>%
+  group_by(tumor, lineage) %>%
+  mutate(freq = n_cells/sum(n_cells))
+
+so_meta_tumors_grouped <- full_join(x = so_meta_tumors,
+                                    y = subtype_counts,
+                                    by = 'cellfrac_type') %>%
+  group_by(cellfrac_type, celltype_full) %>%
+  mutate(mean_freq = mean(freq)) %>%
+  mutate(freq_sem_ymin = mean(freq) - sd(freq)/(n_tumors^0.5)) %>%
+  mutate(freq_sem_ymax = mean(freq) + sd(freq)/(n_tumors^0.5))
+
+so_meta_tumors_summary <- so_meta_tumors %>%
+  group_by(cellfrac_type, celltype_full) %>%
+  summarize(tumor_count = n(),
+            mean_freq = mean(freq),
+            freq_sd_ymin = mean(freq) - sd(freq),
+            freq_sd_ymax = mean(freq) + sd(freq),
+            freq_sem_ymin = mean(freq) - sd(freq)/(tumor_count)^0.5,
+            freq_sem_ymax = mean(freq) + sd(freq)/(tumor_count)^0.5,
+            lineage = lineage)
+
+# mean freq of tumor
+ggplot(so_meta_tumors_summary, aes(y = mean_freq, x = celltype_full, fill = cellfrac_type))+
+  geom_col(position = 'dodge')+
+  geom_point(data = so_meta_tumors, aes(x = celltype_full, y = freq), color = 'gray50', size = 1.5)+
+  theme_bw()+
+  geom_errorbar(aes(x = celltype_full, ymin = freq_sem_ymin, ymax = freq_sem_ymax), position = 'dodge', width = 0.5)+
+  facet_grid(rows = vars(cellfrac_type), cols = vars(lineage), scales = 'free_x', space = 'free_x')+
+  theme(strip.text.x = element_text(angle = 90))+
+  ylab('Mean frequency \n (fraction of tumor)')+
+  xlab('Celltype \n (cluster-celltype)')+
+  RotatedAxis()
+
+```
+
+## S14D - Cluster distribution per tumor
+
+1600 x 720
+
+```{r}
+
+so_meta <- so_merge@meta.data
+
+so_meta_tumors2 <- so_meta %>%
+  dplyr::select(celltype_full, cellfrac_type, lineage, tumor) %>%
+  group_by(tumor, cellfrac_type, celltype_full, lineage) %>%
+  summarize(n_cells = n()) %>%
+  group_by(tumor) %>%
+  mutate(freq = n_cells/sum(n_cells))
+
+# Order tumors by subtype
+tumor_order <- so_meta_tumors2 %>%
+  ungroup() %>%
+  dplyr::select(tumor, cellfrac_type) %>%
+  distinct() %>%
+  arrange(cellfrac_type) %>%
+  dplyr::select(tumor) %>%
+  pull()
+
+# Add tumor order as factor to tumor id & find frequency of cluster per tumor
+so_meta_tumors2 <- so_meta_tumors2 %>%
+  mutate(tumor = factor(tumor, levels = tumor_order)) %>%
+  group_by(tumor) %>%
+  mutate(freq = n_cells/sum(n_cells))
+
+
+# Plot
+ggplot(so_meta_tumors2, aes(x = freq, y = celltype_full, fill = cellfrac_type))+
+  geom_col()+
+  theme_bw()+
+  facet_grid(lineage~tumor, scales = 'free_y', space = 'free')+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        strip.text.y = element_text(angle = 0))+
+  theme(plot.margin = unit(c(1,1,1,1), 'cm'))+
+  ylab('Cluster')+
+  xlab('Frequency of cluster in tumor')
+
+```
+
+## S14E: Epithelial biomarker expression
+
+```{r}
+so_epi <- subset(so_merge,
+                 subset = lineage == 'epithelial')
+
+Idents(so_epi) <- 'celltype_full'
+
+krts <- grep(rownames(so_epi),
+             pattern = '^Krt',
+             value = TRUE)
+
+goi <- c(krts,
+         'Epcam',
+         'Vim',
+         'Cd24',
+         'Cd44')
+
+goi_exp <- AverageExpression(so_epi,
+                             features = goi)$RNA
+
+goi_exp <- goi_exp[rowSums(goi_exp) > 1, ]
+
+pheatmap::pheatmap(t(goi_exp),
+                   color = colorRampPalette(c('purple', 'black', 'yellow'))(50),
+                   main = 'Luminal-basal marker expression',
+                   scale = 'column')
+```
+
+# Supplemental Figure 15
+
+## S15A: UINMF jaccard index
+
+560 x 860 
+
+```{r, fig.asp = 1}
+top_n <- 50
+
+n_shared_factors <- ncol(so_rliger@reductions$inmf@feature.loadings)
+
+
+inmf_top_features <- list()
+
+for(i in 1:n_shared_factors){
+  curr_features <- so_rliger@reductions$inmf@feature.loadings[,i]
+  
+  top_features <- sort(curr_features, decreasing = TRUE)[1:top_n]
+  
+  inmf_top_features[[i]] <- names(top_features)
+  
+}
+
+
+inmf_jaccard <- array(dim = c(n_shared_factors, n_shared_factors))
+rownames(inmf_jaccard) <- colnames(inmf_jaccard) <- 1:n_shared_factors
+
+for(i in 1:n_shared_factors){
+  for(j in 1:n_shared_factors){
+    inmf_jaccard[i,j] <- length(intersect(inmf_top_features[[i]], inmf_top_features[[j]]))/length(union(inmf_top_features[[i]], inmf_top_features[[j]]))
+    
+  }
+}
+
+pheatmap::pheatmap(inmf_jaccard,
+                   color = colorRampPalette(colors = c('white', 'red'))(100),
+                   breaks = seq(from = 0, to = 0.5, by = 0.005),
+                   main = 'Jaccard similarity of UINMF shared-feature factor loadings',
+                   cutree_rows = 7,
+                   cutree_cols = 7)
+
+```
+
+## S15B: Average UINMF embedding per lineage
+
+```{r}
+lineage_embedding <- tibble(lineage = so_rliger@meta.data$celltype_l1.5) %>%
+  cbind(so_rliger@reductions$inmf@cell.embeddings) %>%
+  group_by(lineage) %>%
+  summarize(across(everything(), list(mean)))
+
+pheatmap::pheatmap(scale(t(data.frame(lineage_embedding[,2:ncol(lineage_embedding)],
+                              row.names = lineage_embedding$lineage))),
+                   scale = 'none',
+                   main = 'Average UINMF embedding per lineage \n row z-scored',)
+
+```
+
+## S15C: Clustering optimization
+
+Figure produced in script S5_human_tnbc_integration_rliger
+
+## S15D: Fraction of lineage per cluster
+
+1200 x 300
+
+```{r}
+clust_lineage <- so_rliger@meta.data %>%
+  dplyr::select(RNA_snn_res.0.6, celltype_l1.5) %>%
+  table()
+
+clust_lineage_prop <- prop.table(clust_lineage, margin = 1)
+
+pheatmap::pheatmap(t(clust_lineage_prop),
+                   display_numbers = round(t(clust_lineage_prop),2),
+                   main = 'Fraction of lineage per cluster',
+                   color = colorRampPalette(colors = c('white', 'black'))(100))
+```
+
+## S15E: Sample composition vs unsupervised cluster
+
+```{r}
+freqs <- so_rliger_meta %>%
+  dplyr::select(sample_id, seurat_clusters) %>%
+  table()
+
+col_anno <- data.frame(row.names = cluster_lineage_dict$cluster,
+                       lineage = cluster_lineage_dict$consensus_lineage)
+
+row_anno <- so_rliger_meta %>%
+  dplyr::select(sample_id, species, tumor_subtype) %>%
+  distinct()
+
+row_anno <- data.frame(row_anno[,-1],
+                       row.names = row_anno$sample_id)
+
+anno_colors <- list(lineage = lineage_cols)
+
+col_order <- cluster_lineage_dict %>%
+  arrange(consensus_lineage, cluster)
+
+pheatmap::pheatmap(prop.table(freqs, margin = 1),
+                   annotation_col = col_anno,
+                   annotation_row = row_anno,
+                   color = colorRampPalette(colors = c('white', 'black'))(100),
+                   main = ('Sample composition \n Sample ID vs unsupervised cluster \n (Row Fraction)'))
+```
+
+# sessionInfo()
+
+```{r}
+sessionInfo()
+```
+

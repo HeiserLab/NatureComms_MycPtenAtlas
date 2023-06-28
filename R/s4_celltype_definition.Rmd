@@ -1,0 +1,651 @@
+---
+title: "s4_220331_celltype_definition"
+author: "nlc"
+date: "02/08/2022"
+output:
+  rmdformats::downcute:
+      self_contained: true
+      highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = 'center', out.width = "90%", fig.asp = 0.52)
+```
+
+<style>
+    body .main-container {
+        max-width: 2160px;
+    }
+</style>
+
+# Experiment & contact info
+
+PIs: Rosalie Sears (searsr@ohsu.edu), Laura Heiser (heiserl@ohsu.edu)
+
+Sample preparation: Zinab Doha (dohaz@ohsu.edu)
+
+Library prep from single cells: Xi Li & Colin Daniel (danielc@ohsu.edu)
+
+Analysis: Nick Calistri (calistri@ohsu.edu)
+
+Sequencing performed by OHSU MPSSR
+
+## Analysis design
+
+- load rliger integrated data (s3_celltypes.rds)
+
+- separate each lineage with multiple clusters (epithelial, fibroblast, lymphoid, myeloid)
+
+- perform DE within each lineage
+
+- Convert cluster to celltype and annotate with relevant pathway/expression 
+
+- Save integrated seurat obejct (s4_so_merge.rds) as well as the lineage subset seurat objects
+
+
+### Object names
+
+epi = epithelial
+sni = stromal non-immune
+lym = lymphoid
+mye = myeloid
+
+# Set up
+
+## Load libraries
+```{r}
+library(Matrix)
+library(tidyverse)
+library(Seurat)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+```
+
+## Set seed
+
+```{r}
+set.seed(4)
+```
+
+
+## load s3_celltypes.rds
+
+```{r}
+so_merge <- readRDS('analysis_files/s3_celltypes.rds')
+
+so_merge@meta.data$barcode <- rownames(so_merge@meta.data)
+
+# Ensure scale.data computed for all genes
+if(nrow(so_merge@assays$RNA@scale.data) < nrow(so_merge@assays$RNA@counts)){
+  
+  print('Scaling all features')
+  
+  so_merge <- ScaleData(so_merge,
+                        features = rownames(so_merge))
+  
+}else if(nrow(so_merge@assays$RNA@scale.data) == nrow(so_merge@assays$RNA@counts)){
+  
+  print('ScaleData already computed for all features')
+  
+}
+```
+
+## Create subset seurat objects
+
+```{r}
+so_epi <- subset(so_merge, subset = lineage == 'epithelial')
+
+so_lym <- subset(so_merge, subset = lineage == 'lymphoid')
+
+so_mye <- subset(so_merge, subset = lineage == 'myeloid')
+
+so_fibro <- subset(so_merge, subset = lineage == 'fibroblast')
+
+```
+
+## Prepare DEG function
+
+```{r}
+subset_ego <- function(curr_sub, curr_markers){
+
+  if(nrow(curr_markers) > 1){
+    
+    curr_top <- curr_markers %>%
+      filter(avg_log2FC > 0.5) %>%
+      group_by(cluster) %>%
+      arrange(desc(avg_log2FC)) %>%
+      filter(p_val_adj <= 0.05) %>%
+      slice_head(n = 5)
+    
+    DoHeatmap(curr_sub, features = curr_top$gene)
+    
+    for(i in unique(curr_markers$cluster)){
+      
+      
+      clust_markers <- curr_markers %>%
+        filter(cluster == i)
+      
+      volcano_plot <- ggplot(clust_markers, aes(x = avg_log2FC, y = -log10(p_val_adj), label = gene))+
+        geom_point()+
+        ggrepel::geom_text_repel()+
+        ggtitle(paste0('Cluster: ', i))
+      
+      print(volcano_plot)
+      
+      print(paste0('Evaluating cluster: ', i))
+      curr_top <- curr_markers %>%
+        filter(cluster == i) %>%
+        filter(avg_log2FC >= 0.5) %>%
+        filter(p_val_adj <= 0.05)
+      
+      curr_bottom <- curr_markers %>%
+        filter(cluster == i) %>%
+        filter(avg_log2FC <= -0.5) %>%
+        filter(p_val_adj <= 0.05)
+    
+      ego_top <- enrichGO(gene = curr_top$gene,
+                OrgDb = org.Mm.eg.db,
+                keyType = 'SYMBOL',
+                ont = "ALL",
+                pAdjustMethod = "BH",
+                pvalueCutoff = 0.01,
+                qvalueCutoff = 0.05)
+  
+      if(if(!is.null(ego_top)){nrow(ego_top) > 0 & nrow(curr_top) >= 3}){
+        ego_top_genelist <- curr_top$avg_log2FC
+        names(ego_top_genelist) <- curr_top$gene
+        ego_top_genelist <- sort(ego_top_genelist, decreasing = TRUE)
+        
+        p1 <- dotplot(ego_top, title = paste0('Cluster ', i))
+        
+        p2 <- cnetplot(ego_top,
+                       showCategory = 10,
+                       foldChange = ego_top_genelist,
+                       colorEdge = TRUE)
+        
+        p3 <- heatplot(ego_top,
+                       showCategory = 10,
+                       foldChange = ego_top_genelist)
+        
+        print(p1)
+        print(p2)
+        print(p3)
+    }else(
+      print('No upregulated GOs found')
+    )
+      
+    
+    }
+      
+  }else{
+    print('FindAllMarkers did not return DEGs (only one cluster in celltype?)')
+  }  
+}
+```
+
+# Epithelial subset analysis (epi)
+
+## UMAP and DE within subset
+
+```{r, fig.asp = 1}
+so_epi <- RunUMAP(so_epi, reduction = 'iNMF', dims = 1:50)
+
+DimPlot(so_epi, label = TRUE)+
+  coord_equal()
+
+epi_markers <- FindAllMarkers(so_epi)
+write_csv(epi_markers, file = 'analysis_files/s4_epithelial_markers.csv')
+
+epi_top <- epi_markers %>%
+  group_by(cluster) %>%
+  filter(p_val_adj <= 0.01) %>%
+  arrange(desc(avg_log2FC)) %>%
+  slice_head(n = 10)
+  
+# Heatmap of top markers
+DoHeatmap(so_epi, features = epi_top$gene)
+
+# Dendrogram of clusters
+so_epi <- BuildClusterTree(so_epi)
+PlotClusterTree(so_epi)
+
+# Distribution of cells in each histology
+ggplot(so_epi@meta.data, aes(x = cluster_l2, fill = histology))+
+  geom_bar()+
+  theme_bw()+
+  facet_wrap(~histology)
+
+ggplot(so_epi@meta.data, aes(x = cluster_l2, fill = histology))+
+  geom_bar()+
+  theme_bw()+
+  facet_wrap(~cellfrac_type)
+```
+
+## Cytokeratin profile of epithelial clusters
+
+```{r, fig.asp = 1}
+keratin_features <- grep(row.names(so_epi), pattern = '^Krt', value = TRUE)
+
+keratin_aves <- AverageExpression(so_epi,
+                                  features = keratin_features,
+                                  assay = 'RNA')
+
+keratin_aves_filtered <- keratin_aves$RNA[rowSums(keratin_aves$RNA) != 0,]
+keratin_aves_top <- keratin_aves$RNA[rowSums(keratin_aves$RNA) >= quantile(rowSums(keratin_aves$RNA), 0.9), ]
+
+pheatmap::pheatmap(keratin_aves_filtered)
+
+pheatmap::pheatmap(keratin_aves_top)
+
+DotPlot(so_epi,
+        features = row.names(keratin_aves_top),
+        cols = 'RdYlBu')+
+  coord_flip()
+```
+
+## EGO on DEGs
+
+```{r, fig.asp = 1}
+
+subset_ego(curr_sub = so_epi,
+           curr_markers = epi_markers)
+
+```
+
+## CellMarkerDB markers
+
+```{r}
+# Basal markers:
+VlnPlot(so_epi, features = c('Acta2', 'Krt14', 'Krt5', 'Mylk', 'Vim'))
+
+# Luminal Markers
+VlnPlot(so_epi, features = c('Krt18', 'Krt19', 'Flot2', 'Cdh1'))
+```
+
+
+## epi Celltype_l2
+
+c2 - epi1_luminal_oxphos
+c8 - epi2_luminal
+c10 - epi3_basal
+c14.3 - epi4_proliferating
+c19 - epi5_luminal_ros-response
+
+
+```{r}
+epi_dict <- tibble(cluster = sort(unique(so_epi@meta.data$cluster_l2)),
+                   celltype = c('c2-luminal_oxphos',
+                                   'c8-luminal_gland_development',
+                                   'c10-basal_ecm_modulating',
+                                   'c14.3-proliferating',
+                                   'c19-luminal_ros_response'))
+
+so_epi@meta.data$celltype_full <- plyr::mapvalues(x = so_epi@meta.data$cluster_l2,
+                                          from = epi_dict$cluster,
+                                          to = epi_dict$celltype)
+
+
+DimPlot(so_epi,
+        group.by = 'celltype_full',
+        label = TRUE)+
+  coord_equal()
+
+# pheatmap of celltype
+epi_freq_table <- so_epi@meta.data %>%
+  dplyr::select(celltype_full, cellfrac_type) %>%
+  table()
+
+epi_freq_table <- epi_freq_table[rowSums(epi_freq_table) != 0,]
+
+pheatmap::pheatmap(prop.table(epi_freq_table, margin = 2),
+                   display_numbers = epi_freq_table)
+```
+
+
+# Fibroblast subset analysis (fibro)
+
+## UMAP and DE within subset
+
+```{r, fig.asp = 1}
+so_fibro <- RunUMAP(so_fibro, reduction = 'iNMF', dims = 1:50,
+                  seed.use = 500)
+
+DimPlot(so_fibro, label = TRUE)+
+  coord_equal()
+
+fibro_markers <- FindAllMarkers(so_fibro)
+write_csv(fibro_markers, file = 'analysis_files/s4_fibro_markers.csv')
+
+fibro_top <- fibro_markers %>%
+  group_by(cluster) %>%
+  filter(p_val_adj <= 0.01) %>%
+  arrange(desc(avg_log2FC)) %>%
+  slice_head(n = 10)
+  
+# Heatmap of top markers
+DoHeatmap(so_fibro, features = fibro_top$gene)
+
+# Dendrogram of clusters
+so_fibro <- BuildClusterTree(so_fibro)
+PlotClusterTree(so_fibro)
+
+# Distribution of cells in each histology
+ggplot(so_fibro@meta.data, aes(x = seurat_clusters, fill = histology))+
+  geom_bar()+
+  theme_bw()+
+  facet_wrap(~histology)
+
+ggplot(so_fibro@meta.data, aes(x = seurat_clusters, fill = histology))+
+  geom_bar()+
+  theme_bw()+
+  facet_wrap(~cellfrac_type)
+```
+
+## EGO on DEGs
+
+```{r, fig.asp = 1}
+
+subset_ego(curr_sub = so_fibro,
+           curr_markers = fibro_markers)
+
+```
+
+c7 - fibro1_ctla2a_high
+c12 - fibro2_col11_high
+c17 - fibro3_anti-motility
+
+```{r}
+FeaturePlot(so_fibro,
+            features = c('Mme', 'Ctla2a', 'Col11a1', 'Acta2'),
+            label = TRUE)
+
+fibro_dict <- tibble(cluster = sort(unique(so_fibro@meta.data$cluster_l2)),
+                   celltype = c('c7-ctla2a_high',
+                                   'c12-col11_high',
+                                   'c17-anti_motility'))
+
+so_fibro@meta.data$celltype_full<- plyr::mapvalues(x = so_fibro@meta.data$cluster_l2,
+                                          from = fibro_dict$cluster,
+                                          to = fibro_dict$celltype)
+
+
+DimPlot(so_fibro,
+        group.by = 'celltype_full',
+        label = TRUE)+
+  coord_equal()
+
+# pheatmap of celltype_l2
+fibro_freq_table <- so_fibro@meta.data %>%
+  dplyr::select(celltype_full, cellfrac_type) %>%
+  table()
+
+fibro_freq_table <- fibro_freq_table[rowSums(fibro_freq_table) != 0,]
+
+pheatmap::pheatmap(prop.table(fibro_freq_table, margin = 2),
+                   display_numbers = fibro_freq_table)
+
+```
+
+# Lymphoid subset analysis (lym)
+
+## UMAP and DE within subset
+
+```{r, fig.asp = 1}
+so_lym <- RunUMAP(so_lym, reduction = 'iNMF', dims = 1:50)
+
+DimPlot(so_lym, label = TRUE)+
+  coord_equal()
+
+lym_markers <- FindAllMarkers(so_lym)
+write_csv(lym_markers, file = 'analysis_files/s4_lymphoid_markers.csv')
+
+lym_top <- lym_markers %>%
+  group_by(cluster) %>%
+  filter(p_val_adj <= 0.01) %>%
+  arrange(desc(avg_log2FC)) %>%
+  slice_head(n = 10)
+  
+# Heatmap of top markers
+DoHeatmap(so_lym, features = lym_top$gene)
+
+# Dendrogram of clusters
+so_lym <- BuildClusterTree(so_lym)
+PlotClusterTree(so_lym)
+
+# Distribution of cells in each histology
+ggplot(so_lym@meta.data, aes(x = cluster_l2, fill = histology))+
+  geom_bar()+
+  theme_bw()+
+  facet_wrap(~histology)
+
+ggplot(so_lym@meta.data, aes(x = cluster_l2, fill = histology))+
+  geom_bar()+
+  theme_bw()+
+  facet_wrap(~cellfrac_type)
+```
+
+## FeaturePlots
+
+```{r}
+lym_moi <- c('Cd3e', 'Cd4', 'Trdc', 'Tcrg-C1', 'Cd8a', 'Foxp3', 'Mki67', 'Cd19', 'Cd79b', 'Ms4a1', 'Gzma')
+
+DotPlot(so_lym,
+        features = lym_moi,
+        cols = 'RdYlBu')+
+    coord_flip()
+```
+
+## EGO on DEGs
+
+```{r, fig.asp = 1}
+subset_ego(curr_sub = so_lym,
+           curr_markers = lym_markers)
+
+```
+
+c5 - Cd4 T cell
+c6 - Gamma Delta T cells
+c9 - CD8 T cell
+c13 - Treg
+c14.1 - Proliferating lymphoid
+c21 - B cells (Ms4a1{Cd20})
+c22 - NK (Gzma)
+
+
+```{r}
+lym_dict <- tibble(cluster = sort(unique(so_lym@meta.data$cluster_l2)),
+                   celltype = c('c5-Cd4_T',
+                                'c6-GammaDelta_T',
+                                'c9-Cd8_T',
+                                'c13-Treg',
+                                'c14.1-proliferating',
+                                'c21-B',
+                                'c22-NK'))
+
+so_lym@meta.data$celltype_full <- plyr::mapvalues(x = so_lym@meta.data$cluster_l2,
+                                          from = lym_dict$cluster,
+                                          to = lym_dict$celltype)
+
+
+DimPlot(so_lym,
+        group.by = 'celltype_full',
+        label = TRUE)+
+  coord_equal()
+
+# pheatmap of celltype_full
+lym_freq_table <- so_lym@meta.data %>%
+  dplyr::select(celltype_full, cellfrac_type) %>%
+  table()
+
+lym_freq_table <- lym_freq_table[rowSums(lym_freq_table) != 0,]
+
+pheatmap::pheatmap(prop.table(lym_freq_table, margin = 2),
+                   display_numbers = lym_freq_table)
+
+DotPlot(so_lym,
+        features = lym_moi,
+        cols = 'RdYlBu',
+        group.by = 'celltype_full')+
+  theme_bw()+
+  coord_flip()+
+  RotatedAxis()
+```
+
+
+# myeloid subset analysis (imm)
+
+## UMAP and DE within subset
+
+```{r, fig.asp = 1}
+so_mye <- RunUMAP(so_mye, reduction = 'iNMF', dims = 1:50)
+
+DimPlot(so_mye, label = TRUE)+
+  coord_equal()
+
+mye_markers <- FindAllMarkers(so_mye)
+write_csv(mye_markers, file = 'analysis_files/s4_myeloid_markers.csv')
+
+mye_top <- mye_markers %>%
+  group_by(cluster) %>%
+  filter(p_val_adj <= 0.01) %>%
+  arrange(desc(avg_log2FC)) %>%
+  slice_head(n = 10)
+  
+# Heatmap of top markers
+DoHeatmap(so_mye, features = mye_top$gene)
+
+# Dendrogram of clusters
+so_mye <- BuildClusterTree(so_mye)
+PlotClusterTree(so_mye)
+
+# Distribution of cells in each histology
+ggplot(so_mye@meta.data, aes(x = cluster_l2, fill = histology))+
+  geom_bar()+
+  theme_bw()+
+  facet_wrap(~histology)
+
+ggplot(so_mye@meta.data, aes(x = cluster_l2, fill = histology))+
+  geom_bar()+
+  theme_bw()+
+  facet_wrap(~cellfrac_type)
+```
+
+## EGO on DEGs
+
+```{r, fig.asp = 1}
+
+subset_ego(curr_sub = so_mye,
+           curr_markers = mye_markers)
+
+```
+
+
+c1 - Macrophage
+c3 - Neutrophil Lrg high (S100a8/9 high, low nFeature)
+c4 - Neutrophil Ccl{3,4} high (S100a8/9 high, low nFeature)
+c14.2 - Proliferating
+c15 - cDC2 (Cd209a)
+c16 - Monocyte (Plac8, Ly6c2)
+c18 - IFN response
+c20 - cDC1 (Clec9a, Cadm1)
+c24 - DC
+
+
+```{r}
+mye_moi <- c('Cd14', 'Cd68', 'Cd74', 'Itgam', 'Itgax', 'Mki67', 'S100a8', 'S100a9', 'Ccl3', 'Ccl4', 'Cd209a', 'Plac8', 'Ly6c2', 'Isg15', 'Clec9a', 'Cadm1')
+
+DotPlot(so_mye,
+        features = mye_moi,
+        cols = 'RdYlBu')+
+  theme_bw()+
+  coord_flip()
+
+mye_dict <- tibble(cluster = sort(unique(so_mye@meta.data$cluster_l2)),
+                   celltype = c('c1-Macrophage',
+                                   'c3-Neutrophil_Lrg_high',
+                                   'c4-Neutrophil_CCL3_high',
+                                   'c14.2-proliferating',
+                                   'c15-cDC2',
+                                   'c16-Monocyte',
+                                   'c18-IFN_response',
+                                   'c20-cDC1',
+                                   'c24-DC'))
+
+so_mye@meta.data$celltype_full <- plyr::mapvalues(x = so_mye@meta.data$cluster_l2,
+                                          from = mye_dict$cluster,
+                                          to = mye_dict$celltype)
+
+
+DimPlot(so_mye,
+        group.by = 'celltype_full',
+        label = TRUE)+
+  coord_equal()
+
+# pheatmap of celltype_l2
+mye_freq_table <- so_mye@meta.data %>%
+  dplyr::select(celltype_full, cellfrac_type) %>%
+  table()
+
+mye_freq_table <- mye_freq_table[rowSums(mye_freq_table) != 0,]
+
+pheatmap::pheatmap(prop.table(mye_freq_table, margin = 2),
+                   display_numbers = mye_freq_table)
+
+DotPlot(so_mye,
+        features = mye_moi,
+        cols = 'RdYlBu',
+        group.by = 'celltype_full')+
+  theme_bw()+
+  coord_flip()+
+  RotatedAxis()
+
+ggplot(so_mye@meta.data, aes(x = celltype_full, fill = tumor))+
+  geom_bar()+
+  theme_bw()+
+  RotatedAxis()
+```
+
+# save output
+
+## Add celltype_l2 to so_merge
+
+```{r, fig.asp = 1}
+
+celltype_full_dict <- rbind(epi_dict,
+                            fibro_dict,
+                            lym_dict,
+                            mye_dict,
+                            c(11, 'c11-endothelial'),
+                            c(23, 'c23-perivascular'))
+
+# Add Seurat metadata 
+so_merge@meta.data$celltype_full <- plyr::mapvalues(x = so_merge@meta.data$cluster_l2,
+                                              from = celltype_full_dict$cluster,
+                                              to = celltype_full_dict$celltype)
+
+
+# correct rownames as barcodes
+rownames(so_merge@meta.data) <- so_merge@meta.data$barcode
+
+DimPlot(so_merge,
+        group.by = 'celltype_full',
+        label = TRUE,
+        label.size = 5)+
+  theme(legend.position = 'none')+
+  coord_equal()
+```
+
+
+## Save seurat objects as .rds files
+
+```{r}
+saveRDS(so_merge, file = 'analysis_files/s4_so_merge.rds')
+```
+
+
+# sessionInfo()
+
+```{r}
+sessionInfo()
+```
+

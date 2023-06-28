@@ -1,0 +1,385 @@
+---
+title: "s1_vehicle_stroma_preprocessing"
+author: "nlc"
+date: "01/28/2021"
+output:
+  rmdformats::downcute:
+      self_contained: true
+      highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = 'center', out.width = "90%", fig.asp = 0.52)
+```
+
+<style>
+    body .main-container {
+        max-width: 2160px;
+    }
+</style>
+
+# Experiment & contact info
+
+PIs: Rosalie Sears (searsr@ohsu.edu), Laura Heiser (heiserl@ohsu.edu)
+
+Sample preparation: Zinab Doha (dohaz@ohsu.edu)
+
+Library prep from single cells: Xi Li & Colin Daniel (danielc@ohsu.edu)
+
+Analysis: Nick Calistri (calistri@ohsu.edu)
+
+Sequencing performed by OHSU MPSSR
+
+## Analysis design
+
+- Load each experiment individually
+
+- Perform hashtag demultiplexing on each library individually
+
+- Identify doublets with DoubletFinder
+
+- Save so_list as .rds file
+
+# Set up
+
+## Load libraries
+```{r}
+library(Matrix)
+library(tidyverse)
+library(Seurat)
+library(rliger)
+library(SeuratWrappers)
+library(ggalluvial)
+library(DoubletFinder)
+library(SoupX)
+```
+
+## Set a seed
+```{r}
+set.seed(1)
+```
+
+## Mouse/tumor stats from library_metadata file
+
+```{r}
+# Read in readme with HTO and tumor ID
+lib_meta <- read_csv('library_metadata.csv')
+
+# Add the run_library variable
+lib_meta <- lib_meta %>%
+  mutate(run_library = paste0(mpssr_seq_run_name,
+                              '_',
+                              mpssr_library_name,
+                              str_replace_na(library_suffix, replacement = '')))
+
+lib_meta$mouse_id <- str_split(lib_meta$condition_string, pattern = '_', simplify = TRUE)[,1]
+
+lib_meta$phenotype <- str_replace(lib_meta$mouse_id, pattern = "[:digit:]+", "")
+
+# Calculate how many mice/tumors/phenotypes are represented
+n_mice <- unique(lib_meta$mouse_id) %>%
+  length()
+
+n_phenotype <-  lib_meta %>%
+  dplyr::select(condition_string, phenotype) %>%
+  distinct() %>%
+  dplyr::select(phenotype) %>%
+  table()
+
+n_tumors <- sum(n_phenotype)
+
+knitr::kable(tibble(n_mice = n_mice,
+                    n_tumors = n_tumors))
+
+
+knitr::kable(n_phenotype)
+
+lib_meta %>%
+  dplyr::select(histology) %>%
+  table() %>%
+  knitr::kable()
+
+tumor_histology_dict <- lib_meta %>%
+  dplyr::select(condition_string, histology) %>%
+  distinct()
+
+tumor_histology_dict %>%
+  knitr::kable()
+```
+
+# Load data & HTO demultiplex
+
+## Arguments and settings
+
+```{r}
+use_df <- TRUE # Use DoubletFinder on each library?
+use_soupx <- TRUE # Use SoupX to remove ambient RNA from cell containing droplets?
+```
+
+
+## Load data 
+
+```{r}
+has_histo <- lib_meta %>%
+  filter(! is.na(histology)) %>%
+  mutate(local_dir = paste0('original_data/', run_library)) %>%
+  dplyr::select(local_dir) %>%
+  pull()
+
+data_dirs <- grep(list.dirs(path = 'original_data', recursive = FALSE), pattern = '^original_data/SCL*', value = TRUE)
+
+# Filter to just the directories with histology characterizing stromal poor (SP) versus stromal rich (SR)
+data_dirs <- data_dirs[data_dirs %in% has_histo]
+
+so_list <- list()
+
+for(i in 1:length(data_dirs)){
+  print(paste0('Loading data for directory ', i, ' of ', length(data_dirs), '.'))
+  print(paste0('Current directory is ', data_dirs[i], '.'))
+  
+  # Identify current directory and extract minimal experimental identifier as 'library#_preparer'
+  curr_dir <- data_dirs[i]
+  curr_lib <- str_remove(curr_dir, pattern = 'original_data/')
+  
+  # Read 10X information, create seurat object and add HTO as additional assay
+  temp_10x <- Read10X(paste0(data_dirs[i], '/filtered_feature_bc_matrix/'))
+  
+  if(use_soupx){
+    sc <- load10X(curr_dir)
+    sc <- autoEstCont(sc)
+    out <- adjustCounts(sc)
+    temp_so <- CreateSeuratObject(out[,colnames(out) %in% colnames(temp_10x$`Gene Expression`)], project = 'sears_histology')
+  }else{
+    temp_so <- CreateSeuratObject(temp_10x$`Gene Expression`, project = 'sears_histology')
+  }
+  temp_so[['HTO']] <- CreateAssayObject(counts = temp_10x$`Antibody Capture`)
+  
+  temp_so[['library_id']] <- curr_lib
+  
+  so_list[[i]] <- temp_so
+}
+
+temp_10x <- temp_so <- NULL
+gc()
+```
+
+## HTO demultiplexing
+
+Note: this is done on a per-library basis as different HTOs were used across the experiments. Could do this per experiment, as the cells were split into two libraries per experiment, but keeping it individual for now.
+
+HTO 'expression' is the center log ratio, which for any given HTO feature is:
+$$HTO.1_{exp} = ln{(\frac{HTO.1.count}{geometric.mean(HTO.1 , ... HTO.n)})}$$
+
+```{r, fig.asp = 1}
+
+for(i in 1:length(so_list)){
+  if(length(unique(so_list[[i]]$library_id)) == 1){
+    print(paste0('HTO demultiplexing library ', i, ' of ', length(so_list)))
+    print(paste0('Current library: ', unique(so_list[[i]]$library_id)))
+    
+    curr_so <- so_list[[i]]
+    
+    # Extract relevant meta from README file
+    curr_meta <- lib_meta %>%
+      filter(run_library == unique(curr_so$library_id)) %>%
+      arrange(condition_hto)
+    
+    # Remove any barcodes that had no HTO
+    orig_cell_count <- ncol(curr_so)
+    curr_so <- subset(curr_so, subset = nCount_HTO > 0)
+    print(paste0('Removed ', orig_cell_count - ncol(curr_so), ' barcodes for having zero HTO counts'))
+    
+    
+    # CLR normalize HTO counts and demultiplex
+    curr_so <- NormalizeData(curr_so,
+                             assay = 'HTO',
+                             normalization.method = 'CLR')
+    
+    curr_so <- ScaleData(curr_so,
+                             assay = 'HTO')
+    
+    curr_so <- RunPCA(curr_so,
+                      features = rownames(curr_so@assays$HTO@counts),
+                      assay = 'HTO')
+    
+    curr_so <- RunTSNE(curr_so,
+                       reduction = 'pca',
+                      assay = 'HTO',
+                      check_duplicates = FALSE,
+                      perplexity = 100,
+                      dims = 1:ncol(curr_so@reductions$pca@feature.loadings))
+    
+    curr_so <- HTODemux(curr_so,
+                        assay = 'HTO',
+                        positive.quantile = 0.95,
+                        kfunc = 'clara')
+
+    # Add HTO_count entropy to metadata
+    curr_so@meta.data$hto_count_entropy <- apply(X = curr_so@assays$HTO@counts,
+                                                 FUN = entropy::entropy,
+                                                 MARGIN = 2,
+                                                 unit = 'log2',
+                                                 method = 'ML')
+    
+    curr_so@meta.data$hto_data_entropy <- apply(X = curr_so@assays$HTO@data,
+                                                FUN = entropy::entropy,
+                                                MARGIN = 2,
+                                                unit = 'log2',
+                                                method = 'ML')
+    
+    VlnPlot(curr_so, features = c('hto_count_entropy'))
+    VlnPlot(curr_so, features = c('hto_data_entropy'))
+    
+    #Visualize HTO expression
+    p1 <- RidgePlot(curr_so,
+                    features = row.names(curr_so@assays$HTO@counts), assay = 'HTO',
+                    ncol = 1)
+    
+    p2 <- HTOHeatmap(curr_so, assay = 'HTO')
+    
+    p3 <- FeatureScatter(curr_so,
+                   feature1 = 'nCount_HTO',
+                   feature2 = 'nCount_RNA',
+                   pt.size = 0.1,
+                   group.by = 'HTO_classification.global')+
+      scale_x_log10()+
+      scale_y_log10()
+    
+    p4 <- DimPlot(curr_so,
+                  reduction = 'pca')+
+      coord_equal()
+    
+    p5 <- DimPlot(curr_so,
+                  reduction = 'tsne')+
+      coord_equal()
+    
+    print(p1)
+    print(p2)
+    print(p3)
+    print(p4)
+    print(p5)
+    
+
+    # Automatically rename hash.id to tumor id, where index is preserved (ie HTO = T1, HTO.1 = T2 ... HTO.N = T(N+1))
+    tumor_id <- c('Negative', 'Doublet', curr_meta$condition_string)
+    tumor_index <- c('Negative', 'Doublet', paste0('L', i, '_', 'T', 1:nrow(curr_so@assays$HTO)))
+    hto_ids <- c('Negative', 'Doublet', sort(as.character(unique(curr_so@meta.data$hash.ID)[-c(grep(unique(curr_so@meta.data$hash.ID), pattern = 'Doublet'), grep(unique(curr_so@meta.data$hash.ID), pattern = 'Negative'))])))
+    
+    curr_so@meta.data$tumor_index <- plyr::mapvalues(x = curr_so@meta.data$hash.ID,
+                                               from = hto_ids,
+                                               to = tumor_index)
+    curr_so@meta.data$tumor <- plyr::mapvalues(x = curr_so@meta.data$hash.ID,
+                                               from = hto_ids,
+                                               to = tumor_id)
+    
+    # show table of cell counts per HTO assignment
+    curr_so@meta.data %>%
+      dplyr::select(hash.ID, tumor) %>%
+      table() %>%
+      knitr::kable()
+    
+    # Run DoubletFinder on the library
+    if(use_df == TRUE){
+      # Preprocess so for DoubletFinder
+      curr_so <- NormalizeData(curr_so)
+      curr_so <- FindVariableFeatures(curr_so,
+                                    selection.method = 'vst',
+                                    nfeatures = 2000)
+      curr_so <- ScaleData(curr_so)
+      curr_so <- RunPCA(curr_so)
+      curr_so <- FindNeighbors(curr_so)
+      curr_so <- FindClusters(curr_so, resolution = 0.4)
+      
+      # pK identification (no ground-truth)
+      sweep.curr_so <- paramSweep_v3(curr_so,
+                                     PCs = 1:10,
+                                     sct = FALSE)
+      sweep.stats.curr_so <- summarizeSweep(sweep.curr_so, GT = FALSE)
+      bcmvn.curr_so <- find.pK(sweep.stats.curr_so)
+      max_pk <- as.numeric(as.character(bcmvn.curr_so$pK[which.max(bcmvn.curr_so$BCmetric)])) #Converting from factor to numeric is weird, but this is a recommended method
+        
+      
+      
+      # Homotypic doublet proportion estimate
+      homotypic.prop <- modelHomotypic(curr_so@meta.data$seurat_clusters)
+      nExp_poi <- round(0.075*nrow(curr_so@meta.data))
+      
+      curr_so <- doubletFinder_v3(curr_so,
+                                     PCs = 1:10,
+                                     pN = 0.25,
+                                     pK = max_pk,
+                                     nExp = nExp_poi,
+                                     reuse.pANN = FALSE,
+                                     sct = FALSE)
+      
+      colnames(curr_so@meta.data)[ncol(curr_so@meta.data)] <- 'DF.classifications'
+      colnames(curr_so@meta.data)[ncol(curr_so@meta.data) - 1] <- 'DF.pANN'
+    
+      
+          # Visualize doublets
+    curr_so <- RunUMAP(curr_so,
+                       dims = 1:20)
+    
+    umap1 <- DimPlot(curr_so, group.by = 'tumor')+
+      coord_equal()
+    
+    umap2 <- DimPlot(curr_so, group.by = colnames(curr_so@meta.data)[ncol(curr_so@meta.data)])+
+      coord_equal()
+    
+    umap3 <- FeaturePlot(curr_so, features = colnames(curr_so@meta.data)[ncol(curr_so@meta.data) - 1])+
+      coord_equal()
+      
+    print(umap1)
+    print(umap2)
+    print(umap3)
+    }
+      
+
+      
+    # Stash the HTO demultiplexed seurat object back into the list
+    
+    so_list[[i]] <- curr_so
+  
+  }else {
+    print(paste0('Error HTO demultiplexing library # ', i))
+    print(paste0('Multiple library IDs detected: ', unique(so_list[[i]]$library_id)))
+    
+  }
+}
+
+curr_so <- NULL
+gc()
+```
+
+# Save output
+```{r}
+saveRDS(so_list,
+        file = 'analysis_files/s1_seurat_list.rds')
+```
+
+# Save subset for pipeline demo
+```{r}
+n_cells <- 50
+
+so_list_subset <- list()
+
+for(i in 1:length(so_list)){
+  cells_subset <- colnames(so_list[[i]])[sample(x = ncol(so_list[[i]]),
+                                              size = n_cells,
+                                              replace = FALSE)]
+  
+  so_list_subset[[i]] <- subset(so_list[[i]],
+                                cells = cells_subset)
+}
+
+saveRDS(so_list_subset, file = 'analysis_files/s1_seurat_list_subset.rds')
+```
+
+
+
+# sessionInfo()
+
+```{r}
+sessionInfo()
+```
+

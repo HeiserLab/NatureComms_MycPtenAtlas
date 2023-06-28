@@ -1,0 +1,580 @@
+---
+title: "s3_220131_cluster_optimization"
+author: "nlc"
+date: "01/31/2022"
+output:
+  rmdformats::downcute:
+      self_contained: true
+      highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = 'center', out.width = "90%", fig.asp = 0.52)
+```
+
+<style>
+    body .main-container {
+        max-width: 2160px;
+    }
+</style>
+
+# Experiment & contact info
+
+PIs: Rosalie Sears (searsr@ohsu.edu), Laura Heiser (heiserl@ohsu.edu)
+
+Sample preparation: Zinab Doha (dohaz@ohsu.edu)
+
+Library prep from single cells: Xi Li & Colin Daniel (danielc@ohsu.edu)
+
+Analysis: Nick Calistri (calistri@ohsu.edu)
+
+Sequencing performed by OHSU MPSSR
+
+## Analysis design
+
+- load rliger integrated data (s2_vehicle_rliger.rds)
+
+- Optimize leiden clustering for maximized silhouette width
+
+- Visualize cluster versus lineage markers
+
+- Manually assign lineage
+
+- Run 3D UMAP and visualize clusters + lineage in 3d
+
+- Find DEGs (upregulated) for each cluster compared to all other clusters
+
+- Save updated so_merge in updated .rds file
+
+
+# Set up
+
+## Load libraries
+```{r}
+library(Matrix)
+library(tidyverse)
+library(Seurat)
+library(cluster)
+```
+
+## load s2_vehicle_integrated.rds and set seed
+```{r}
+so_merge <- readRDS('analysis_files/s2_vehicle_integrated.rds')
+
+so_merge@meta.data$cell_barcode <- rownames(so_merge@meta.data)
+
+set.seed(3)
+```
+
+## Prepare silhoutte scoring function
+
+```{r}
+library(bluster)
+
+cluster_sweep <- function(resolution = seq(from = 0.3, to = 0.8, by = 0.1), seurat_object, embedding, ndims = ncol(embedding)){
+  
+  
+  for(i in resolution){
+    seurat_object <- FindClusters(seurat_object,
+                                resolution = i,
+                                algorithm = 4)
+  
+    p1 <- DimPlot(seurat_object,
+                  group.by = 'seurat_clusters',
+                  label = TRUE)+
+      coord_equal()
+    
+    print(p1)
+    
+    curr_clusters <- seurat_object@meta.data$seurat_clusters 
+    
+    sil <- approxSilhouette(x = embedding,
+                            clusters = curr_clusters)
+    
+    boxplot(split(sil$width, curr_clusters),
+            main = paste0('Resolution: ', i, '\n Mean sil.width: ', mean(sil$width)))
+    
+    best.choice <- ifelse(sil$width > 0,
+                          curr_clusters,
+                          sil$other)
+    
+    table(Assigned=curr_clusters, Closest=best.choice)
+    
+    # 
+    rmsd <- clusterRMSD(embedding, curr_clusters)
+    barplot(rmsd,
+            main = paste0('Resolution: ', i, '\n Mean rmsd: ', mean(rmsd)))
+    
+    
+    if(i == resolution[1]){
+      qc <- tibble(res = i,
+                   n_clusters = length(unique(sil$cluster)),
+                   mean_sil_width = mean(sil$width),
+                   mean_rmsd = mean(rmsd))
+    }else{
+      qc <- rbind(qc,
+                  tibble(res = i,
+                  n_clusters = length(unique(sil$cluster)),
+                  mean_sil_width = mean(sil$width),
+                  mean_rmsd = mean(rmsd)))
+    }
+    
+  }
+  return(qc)
+}
+```
+
+
+# Cluster optimization (by silhouette width)
+
+```{r}
+
+reduction_to_use <- 'iNMF'
+ndims <- 50
+
+###
+
+ElbowPlot(so_merge, ndims = 50, reduction = 'harmony')
+
+so_merge <- FindNeighbors(so_merge,
+                          reduction = reduction_to_use,
+                          dims = 1:ndims)
+
+so_merge <- RunUMAP(so_merge,
+                    reduction = reduction_to_use,
+                    dims = 1:ndims)
+
+
+cluster_qc <- cluster_sweep(seurat_object = so_merge,
+                            embedding = so_merge@reductions$iNMF@cell.embeddings,
+                            resolution = seq(from = 0.1, to = 1.5, by = 0.05))
+
+cluster_qc <- cluster_qc %>%
+  gather(- c(res), value = 'value', key = 'metric')
+
+ggplot(cluster_qc, aes(x = res, y = value, color = metric))+
+  geom_point()+
+  geom_line()+
+  theme_bw()+
+  facet_wrap(~metric, ncol = 3, scales = 'free_y')+
+  scale_x_continuous(breaks = seq(from = 0, to = 1.5, by = 0.25))+
+  xlab('Leiden resolution')+
+  geom_vline(xintercept = 0.45, linetype = 'dashed')
+
+
+```
+
+# Supplementary figure for clustering optimization
+
+```{r}
+
+# 1080 x 240
+ggplot(cluster_qc, aes(x = res, y = value, color = metric))+
+  geom_point()+
+  geom_line()+
+  theme_bw()+
+  facet_wrap(~metric, ncol = 3, scales = 'free_y')+
+  scale_x_continuous(breaks = seq(from = 0, to = 1.5, by = 0.25))+
+  xlab('Leiden resolution')+
+  geom_vline(xintercept = 0.45, linetype = 'dashed')
+```
+
+
+## Cluster based on optimal resolution
+
+```{r}
+so_merge <- FindClusters(so_merge,
+                         algorithm = 4,
+                         resolution = 0.45)
+
+DimPlot(so_merge, label = TRUE, label.size = 8)+
+  coord_equal()+
+  theme(legend.position = 'none')
+
+ggplot(so_merge@meta.data, aes(x = seurat_clusters, fill = tumor))+
+  geom_bar()+
+  theme_bw()+
+  facet_wrap(~tumor)
+
+ggplot(so_merge@meta.data, aes(x = seurat_clusters, fill = histology))+
+  geom_bar()+
+  theme_bw()+
+  facet_wrap(~histology, ncol = 1)
+
+```
+
+
+# Visualize lineage markers by cluster
+
+```{r}
+DotPlot(so_merge,
+        features = c('Ptprc', 'Cd74', 'Epcam', 'Cd14', 'Cd3e', 'Pdgfra', 'Krt5', 'Pecam1', 'Mki67', 'Pdgfrb'),
+        cols = 'RdYlBu')+
+  theme_bw()+
+  coord_flip()
+```
+
+# Cluster 14 lineage assignment
+
+## Subset cluster 14
+
+```{r}
+c14 <- subset(so_merge,
+              subset = seurat_clusters == 14)
+```
+
+Harmony is used because the underlying PCA will separate celltype in sparser latent space than iNMF
+
+## Harmony + UMAP
+
+```{r}
+library(harmony)
+
+c14 <- FindVariableFeatures(c14)
+c14 <- NormalizeData(c14)
+c14 <- ScaleData(c14)
+c14 <- RunPCA(c14)
+c14 <- RunHarmony(c14,
+                        group.by.vars = 'library_id')
+
+ElbowPlot(c14)
+
+c14 <- RunUMAP(c14, reduction = 'harmony', dims = 1:5,
+                  seed.use = 500)
+
+DimPlot(c14, label = TRUE)+
+  coord_equal()
+
+FeaturePlot(c14,
+            features = c('Epcam', 'Cd3e', 'Cd14', 'Pdgfra'))
+```
+
+## Subcluster
+
+```{r}
+c14 <- FindNeighbors(c14,
+                           reduction = 'harmony',
+                           dims = 1:5)
+
+
+cluster_qc <- cluster_sweep(seurat_object = c14,
+                            embedding = c14@reductions$harmony@cell.embeddings[,1:5],
+                            resolution = seq(from = 0.1, to = 1.5, by = 0.1))
+
+cluster_qc <- cluster_qc %>%
+  gather(c(-res, -n_clusters), value = 'value', key = 'metric')
+
+ggplot(cluster_qc, aes(x = res, y = value, color = metric))+
+  geom_point(aes(size = n_clusters))+
+  geom_line()+
+  theme_bw()+
+  facet_wrap(~metric, ncol = 1, scales = 'free_y')
+
+c14 <- FindClusters(c14,
+                          resolution = 0.1,
+                          algorithm = 4)
+
+DotPlot(c14,
+        features = c('Cd14', 'Cd3e', 'Epcam', 'Pdgfra', 'Pecam1'),
+        cols = 'RdYlBu')+
+  coord_flip()+
+  RotatedAxis()
+
+DimPlot(c14, label = TRUE, label.size = 8)+
+  coord_equal()+
+  theme(legend.position = 'none')
+
+FeaturePlot(c14, features = c('Cd3e', 'Cd14', 'Cd74', 'Epcam'))
+
+DotPlot(c14,
+        features = c('Ptprc', 'Cd74', 'Epcam', 'Cd14', 'Cd3e', 'Pdgfra', 'Krt5', 'Pecam1', 'Mki67', 'Pdgfrb'),
+        cols = 'RdYlBu')+
+  theme_bw()+
+  coord_flip()
+
+c14_subcluster_dict <- tibble(cell_barcode = rownames(c14@meta.data),
+                              cluster_l2 = 14 + as.numeric(c14@meta.data$seurat_clusters)/10)
+```
+
+## Rejoin subclustered with the rest of data
+
+```{r}
+# Add c14 subcluster info back to main seurat object
+so_merge@meta.data$cell_barcode <- rownames(so_merge@meta.data)
+
+so_merge@meta.data <- full_join(x = so_merge@meta.data,
+                                y = c14_subcluster_dict,
+                                by = 'cell_barcode',
+                                suffix = c('', ''))
+
+rownames(so_merge@meta.data) <- so_merge@meta.data$cell_barcode
+
+# Fill in cluster_l2 as seurat_clusters for each cluster without subclusters
+so_merge@meta.data$cluster_l2[is.na(so_merge@meta.data$cluster_l2)] <- so_merge@meta.data$seurat_clusters[is.na(so_merge@meta.data$cluster_l2)]
+
+Idents(so_merge) <- 'cluster_l2'
+```
+
+# Assign lineage
+
+Lineage is biological interpretation from major markers.
+
+```{r}
+DotPlot(so_merge,
+        features = c('Ptprc', 'Cd74', 'Epcam', 'Cd14', 'Cd3e', 'Pdgfra', 'Krt5', 'Pecam1', 'Mki67', 'Pdgfrb'),
+        cols = 'RdYlBu')+
+  theme_bw()+
+  coord_flip()
+
+epi_clusters <- c(2, 8, 10, 19, 14.3)
+lymphoid_clusters <- c(5, 6, 9, 13, 14.1, 21, 22)
+myeloid_clusters <- c(1, 3, 4, 14.2, 15, 16, 18, 20, 24)
+fibroblast_clusters <- c(7, 12, 17)
+endothelial_clusters <- c(11)
+perivascular_clusters <- c(23)
+
+
+lineage_dict <- tibble(lineage = c(rep('epithelial', length(epi_clusters)),
+                                   rep('lymphoid', length(lymphoid_clusters)),
+                                   rep('myeloid', length(myeloid_clusters)),
+                                   rep('fibroblast', length(fibroblast_clusters)),
+                                   rep('endothelial', length(endothelial_clusters)),
+                                   rep('perivascular', length(perivascular_clusters))),
+                      cluster_id = c(epi_clusters, lymphoid_clusters, myeloid_clusters, fibroblast_clusters,
+                                     endothelial_clusters, perivascular_clusters))
+
+so_merge[['lineage']] <- plyr::mapvalues(x = so_merge@meta.data$cluster_l2,
+                                             from = lineage_dict$cluster_id,
+                                             to = lineage_dict$lineage)
+
+# Make sure cluster_l2 and lineage are factors for Seurat plotting compatibility
+so_merge@meta.data$lineage <- as.factor(so_merge@meta.data$lineage)
+so_merge@meta.data$cluster_l2 <- as.factor(so_merge@meta.data$cluster_l2)
+
+DotPlot(so_merge,
+        features = c( 'Pecam1', 'Epcam', 'Krt5', 'Pdgfra', 'Ptprc', 'Cd3e', 'Cd14', 'Cd74', 'Pdgfrb'),
+        cols = 'RdYlBu',
+        group.by = 'lineage')+
+  coord_flip()+
+  RotatedAxis()
+```
+
+
+# Cluster relationship investigation
+
+## Lineage vs nmf component score
+
+```{r, fig.asp = 1}
+# Average iNMF embeddings to show relationship to lineage
+cluster_embedding <- tibble(lineage = so_merge@meta.data$lineage) %>%
+  cbind(so_merge@reductions$iNMF@cell.embeddings) %>%
+  group_by(lineage) %>%
+  summarize(across(everything(), list(mean)))
+
+pheatmap::pheatmap(data.frame(cluster_embedding[,2:ncol(cluster_embedding)],
+                              row.names = cluster_embedding$lineage),
+                   scale = 'column',
+                   main = 'Average iNMF embedding per cluster \n column z-scored')
+
+# Average iNMF embedding to show relationship to cluster, annotated by lineage
+cluster_embedding <- tibble(cluster_l2 = so_merge@meta.data$cluster_l2) %>%
+  cbind(so_merge@reductions$iNMF@cell.embeddings) %>%
+  group_by(cluster_l2) %>%
+  summarize(across(everything(), list(mean)))
+
+annotation_rows <- data.frame(lineage = lineage_dict$lineage,
+                              row.names = lineage_dict$cluster_id)
+
+pheatmap::pheatmap(data.frame(cluster_embedding[,2:ncol(cluster_embedding)],
+                              row.names = cluster_embedding$cluster_l2),
+                   scale = 'row',
+                   main = 'Average iNMF embedding per cluster \n row z-scored',
+                   annotation_row = annotation_rows,
+                   cutree_rows = 7)
+
+pheatmap::pheatmap(data.frame(cluster_embedding[,2:ncol(cluster_embedding)],
+                              row.names = cluster_embedding$cluster_l2),
+                   scale = 'column',
+                   main = 'Average iNMF embedding per cluster \n column z-scored',
+                   annotation_row = annotation_rows,
+                   cutree_rows = 6)
+
+DimPlot(so_merge,
+        label = TRUE,
+        label.size = 6,
+        group.by = 'lineage')+
+  coord_equal()
+```
+
+# Correlation between clusters
+
+code adapted from: https://github.com/satijalab/seurat/issues/1552
+
+```{r, fig.asp = 1}
+Idents(so_merge) <- 'cluster_l2'
+
+av.exp <- AverageExpression(so_merge)$RNA[VariableFeatures(so_merge),]
+cor.exp <- as.data.frame(cor(av.exp, method = 'pearson'))
+
+pheatmap::pheatmap(cor.exp,
+                   annotation_row = annotation_rows)
+
+DimPlot(so_merge,
+        label = TRUE)+
+  coord_equal()
+```
+
+
+# Celltype fractions
+
+## Visualize celltype fractions per tumor
+```{r}
+so_merge_meta <- so_merge@meta.data %>%
+  mutate(tumor_pheno = paste0(tumor, '-', histology))
+
+freq_table <- so_merge_meta %>%
+  dplyr::select(lineage, tumor_pheno) %>%
+  table()
+
+col_anno <- data.frame(histology = str_split(colnames(freq_table), pattern = '-', simplify = TRUE)[,2],
+                       log10_n_cells = log10(colSums(freq_table)),
+                       row.names = colnames(freq_table))
+
+pheatmap::pheatmap(prop.table(freq_table, margin = 2), 
+                   display_numbers = freq_table,
+                   main = 'celltype fraction \n Number = n_cells per celltype per tumor',
+                   annotation_col = col_anno)
+```
+
+## Assign celltype_frac tumor type
+
+- SP = stromal poor
+- SR_IP = stromal-rich immune poor
+- SR_IR = stromal-rich immune rich
+
+```{r}
+sp <- c('V8_T1', 'V3_T2', 'V4', 'V3_T1')
+srip <- c('V6_T1', 'V6_T3')
+srir <- c('V7_T3', 'V7_T1', 'V7_T2', 'V5', 'V6_T2')
+
+cellfrac_assignments <- data.frame(rbind(cbind('SP', sp),
+                                   cbind('SR_IP', srip),
+                                   cbind('SR_IR', srir)))
+
+colnames(cellfrac_assignments) <- c('cellfrac_type', 'tumor')
+
+so_merge@meta.data$cellfrac_type <- plyr::mapvalues(x = so_merge@meta.data$tumor,
+                                              from = cellfrac_assignments$tumor,
+                                               to = cellfrac_assignments$cellfrac_type)
+
+# Visualize results
+table(so_merge@meta.data$cellfrac_type) %>%
+  knitr::kable()
+
+DimPlot(so_merge,
+        group.by = 'cellfrac_type')+
+  facet_wrap(~cellfrac_type)
+
+so_meta <- so_merge@meta.data
+
+ggplot(so_meta, aes(x = cluster_l2, fill = cellfrac_type))+
+  geom_bar()+
+  theme_bw()+
+  facet_grid(cellfrac_type~lineage, scales = 'free', space = 'free_x')+
+  RotatedAxis()
+```
+
+
+# 3d umap
+
+```{r, fig.asp = 1}
+so_merge <- RunUMAP(so_merge,
+                    reduction = 'iNMF',
+                    dims = 1:50,
+                    n.components = 3L,
+                    reduction.name = 'umap3d',
+                    reduction.key = 'umap3d_')
+
+so_meta <- so_merge@meta.data %>%
+  mutate(umap3d_1 = so_merge@reductions$umap3d@cell.embeddings[,1]) %>%
+  mutate(umap3d_2 = so_merge@reductions$umap3d@cell.embeddings[,2]) %>%
+  mutate(umap3d_3 = so_merge@reductions$umap3d@cell.embeddings[,3])
+
+plotly::plot_ly(so_meta,
+                x = ~umap3d_1,
+                y = ~umap3d_2,
+                z = ~umap3d_3,
+                color = ~seurat_clusters)
+
+plotly::plot_ly(so_meta,
+                x = ~umap3d_1,
+                y = ~umap3d_2,
+                z = ~umap3d_3,
+                color = ~lineage)
+```
+
+# Find DEG & enriched ontologies for each cluster overall
+
+## load gene enrichment libraries
+```{r}
+library(clusterProfiler)
+library(org.Mm.eg.db)
+```
+
+## Find DEG
+
+```{r, fig.asp = 1.5}
+Idents(so_merge) <- 'cluster_l2'
+markers <- FindAllMarkers(so_merge)
+
+top_markers <- markers %>%
+  group_by(cluster) %>%
+  arrange(desc(avg_log2FC)) %>%
+  slice_head(n = 5)
+
+# Scale data for all genes for heatmap purposes
+so_merge <- ScaleData(so_merge, 
+                      features = rownames(so_merge))
+
+DoHeatmap(so_merge, features = top_markers$gene)
+
+write_csv(markers, 'analysis_files/s3_cluster_l2_markers.csv')
+```
+
+## Save DEG for each lineage that has more than one cluster
+
+```{r}
+for(i in unique(so_merge@meta.data$lineage)){
+  
+  lineage_clusters <- so_merge@meta.data %>%
+    filter(lineage == i) %>%
+    pull(cluster_l2) %>%
+    unique() %>%
+    droplevels()
+  
+  if(length(lineage_clusters) > 1){
+    
+    lineage_markers <-markers %>%
+      filter(cluster %in% lineage_clusters)
+    
+    write_csv(lineage_markers, paste0('analysis_files/s3_', i, '_markers.csv'))
+    
+  }
+  
+}
+
+```
+
+
+# save rds output
+
+```{r}
+saveRDS(so_merge, file = 'analysis_files/s3_celltypes.rds')
+```
+
+# sessionInfo()
+
+```{r}
+sessionInfo()
+```
+
